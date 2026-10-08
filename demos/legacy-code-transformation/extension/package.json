@@ -1,0 +1,98 @@
+{
+  "name": "legacy-code-transformation-demo",
+  "displayName": "Legacy Code Transformation Demo",
+  "description": "A bounded proof of concept for source-grounded, approval-gated refactoring proposals.",
+  "version": "0.1.0",
+  "publisher": "hve-core-demo",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-discovery.js && node --check src/source-evidence.js && node --check src/roslyn-worker.js && node --check src/proposal-contract.js",
+    "test": "node --test"
+  },
+  "contributes": {
+    "chatAgents": [
+      {
+        "path": "./agents/legacy-code-transformation.agent.md"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "legacy_code_transformation_demo_discover_target",
+        "displayName": "Discover target context",
+        "modelDescription": "Read-only discovery for one function or class in the exact open project root. Returns in-root document symbols, references, call hierarchy when available, and bounded text matches. C# analysis requires confirmation because MSBuild design-time targets may run project-defined tasks; declining uses syntax-only Roslyn analysis and bounded text evidence.",
+        "userDescription": "Collect source-grounded evidence; C# provider analysis asks before project loading.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectRoot", "targetFile", "targetSymbol"],
+          "properties": {
+            "projectRoot": {
+              "type": "string",
+              "description": "Absolute path of the project folder. It must exactly match an open VS Code workspace folder."
+            },
+            "targetFile": {
+              "type": "string",
+              "description": "Absolute path of the target source file under projectRoot."
+            },
+            "targetSymbol": {
+              "type": "string",
+              "description": "Exact function, method, or class name to inspect."
+            }
+          }
+        },
+        "tags": ["readOnly"]
+      },
+      {
+        "name": "legacy_code_transformation_demo_read_source_evidence",
+        "displayName": "Read source evidence",
+        "modelDescription": "Read a requested one-based line range from normalized project-relative paths in the exact open project root. Use only for paths identified by bounded discovery. This tool is read-only and never reads outside the root.",
+        "userDescription": "Read focused source, test, README, or documentation excerpts inside the selected project root.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectRoot", "requests"],
+          "properties": {
+            "projectRoot": {
+              "type": "string",
+              "description": "Absolute path of the project folder. It must exactly match an open VS Code workspace folder."
+            },
+            "requests": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "startLine", "endLine"],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "Normalized project-relative path using forward slashes, returned by bounded discovery."
+                  },
+                  "startLine": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "First one-based line to read."
+                  },
+                  "endLine": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Last one-based line to read, inclusive."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tags": ["readOnly"]
+      }
+    ]
+  }
+}
