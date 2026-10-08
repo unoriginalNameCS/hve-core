@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { discoverTarget } = require('../src/workspace-discovery');
+const { collectDocumentSymbols, discoverTarget, sourceExcerpt } = require('../src/workspace-discovery');
 const { isPathWithinRoot } = require('../src/workspace-scope');
 const { registerDiscoveryTool } = require('../src/extension');
 const { runRoslynAnalysis } = require('../src/roslyn-worker');
@@ -18,6 +18,15 @@ function makeUri(filePath, scheme = 'file', authority = '') {
     path: filePath.split(path.sep).join('/')
   };
 }
+
+test('target source uses the full symbol range without adjacent same-line source', () => {
+  const content = 'class Target { void Execute() {} void Other() {} }';
+  const range = { start: { line: 0, character: 15 }, end: { line: 0, character: 32 } };
+  const selectionRange = { start: { line: 0, character: 20 }, end: { line: 0, character: 27 } };
+  const [symbol] = collectDocumentSymbols([{ name: 'Execute', range, selectionRange }], makeUri('Target.cs'));
+  assert.deepEqual(symbol.sourceRange, range);
+  assert.equal(sourceExcerpt(content, symbol.sourceRange).text, 'void Execute() {}');
+});
 
 function makeVscode(workspaceFolder, fileUris, providerResults, readPaths, confirmationResult = 'Continue with C# providers') {
   const executedCommands = [];

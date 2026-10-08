@@ -15,16 +15,67 @@
     "onStartupFinished"
   ],
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-discovery.js && node --check src/source-evidence.js && node --check src/roslyn-worker.js && node --check src/proposal-contract.js",
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-discovery.js && node --check src/source-evidence.js && node --check src/roslyn-worker.js && node --check src/proposal-contract.js && node --check src/foundry-adapter.js && node --check src/proposal-report.js && node --check src/proposal-apply.js && node --check src/fixture-replay.js && node --check src/node-fixture.js",
     "test": "node --test"
   },
   "contributes": {
+    "commands": [
+      {
+        "command": "legacyCodeTransformation.generateProposalReport",
+        "title": "Legacy Code Transformation: Generate Proposal Report"
+      },
+      {
+        "command": "legacyCodeTransformation.reviewAndApplyProposal",
+        "title": "Legacy Code Transformation: Review and Apply Proposal"
+      }
+    ],
+    "configuration": {
+      "title": "Legacy Code Transformation",
+      "properties": {
+        "legacyCodeTransformation.reportDirectory": {
+          "type": "string",
+          "default": "reports/legacy-code-transformation",
+          "description": "Artifact-only project-relative report directory inside the selected opened root. Hidden, dependency, source directories, and symlink ancestors are rejected."
+        }
+      }
+    },
     "chatAgents": [
       {
         "path": "./agents/legacy-code-transformation.agent.md"
       }
     ],
     "languageModelTools": [
+      {
+        "name": "legacy_code_transformation_demo_generate_proposal_report",
+        "displayName": "Generate a source-grounded proposal report",
+        "modelDescription": "Recollect bounded saved source and evidence through owned routines, validate one exact target proposal and write a unique Markdown report after extension-owned report confirmation. Default mock never reads environment or calls transport. Live mode requires explicit user request and separate exact-context sharing consent. Returns candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply. No tests or source writes during generation.",
+        "userDescription": "Confirm report creation, review the generated report, then separately approve application if wanted.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectRoot", "targetFile", "targetSymbol"],
+          "properties": {
+            "projectRoot": { "type": "string", "description": "Absolute path exactly matching an opened project workspace folder." },
+            "targetFile": { "type": "string", "description": "Absolute saved source file path inside projectRoot." },
+            "targetSymbol": { "type": "string", "description": "Exact selected function, method or class name." },
+            "mode": { "type": "string", "enum": ["mock", "live"], "default": "mock", "description": "Use mock unless the user explicitly requests live." }
+          }
+        },
+        "tags": ["proposalBound"]
+      },
+      {
+        "name": "legacy_code_transformation_demo_apply_proposal",
+        "displayName": "Review and apply stored proposal",
+        "modelDescription": "Accept only an extension-owned proposal ID from generation in this session after the user reviews the report and requests application. Mandatory extension modal shows exact file, original, replacement, diff and hashes, independently of tool auto-approval. Applies only known hash-verified pizza or Node replacements after disposable before/after tests and replay. No caller patches or approval flags.",
+        "userDescription": "Confirm an exact stored proposal, verify controlled fixture behavior on a disposable copy, then apply only if source and report remain current.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proposalId"],
+          "properties": { "proposalId": { "type": "string" } }
+        },
+        "tags": ["proposalBound"]
+      },
       {
         "name": "legacy_code_transformation_demo_discover_target",
         "displayName": "Discover target context",

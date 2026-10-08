@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "checkJs": false, "target": "ES2022", "module": "commonjs" },
+  "include": ["src/**/*.js", "tests/**/*.js"]
+}

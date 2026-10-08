@@ -13,10 +13,10 @@
 
 The plan will build a contained VS Code proof of concept that analyzes a selected legacy function or class, produces a source-grounded proposal, waits for approval of the exact change, and then compares tests and representative runs before and after. The first slice is the .NET 10 pizza eligibility sample; Node.js 24.19 banking transfer follows. Java remains deferred.
 
-* Bottom line: implementation planning is underway from completed RPI research; no product source code has been changed.
+* Bottom line: P01-P03 and P04-T01 automation are complete. Only P04-T02 native development-host smoke remains; it requires separate permission. The full plan remains Partial.
 * Why this matters: an inheriting developer needs evidence-backed context and a behavior-checked proposal before modifying difficult code.
-* Planning result: P01, P02-T01, and P02-T02 are complete. P02-T03 is in progress with a local proposal validator and Markdown renderer; the Foundry adapter, evidence wiring, and report writer remain.
-* Confidence and uncertainty: worker compilation, syntax parsing, external-reference rejection, root-filtered results, and the Node-launched controlled-fixture discovery path are validated. The VS Code development-host interaction still needs a manual smoke test; arbitrary project loading stays gated.
+* Planning result: Both fixtures use owned evidence, exact-target validation, mock-default reports, immutable memory-only candidates, mandatory exact-diff approval and real disposable verification before source writes. The manual agent exposes the requested registered discovery/evidence, generation and ID-only apply tools. P04/P04-T02 remain unchecked until host smoke.
+* Confidence and uncertainty: extension syntax and 70/70 tests, Node fixture 8/8 tests and root Markdown lint pass. Installed Node `v24.19.0` matches the planned runtime. Frontmatter/public-feed validation cannot start without `pwsh`; real host/provider readiness and optional live resource compatibility remain unverified. No host launch, live call or credential access is authorized here.
 
 ### What You May Not Know
 
@@ -66,7 +66,7 @@ flowchart LR
 	class agent,tools,roslyn,report,approval,apply,runner,fixtures,tests new
 ```
 
-The current repository has agent customization and a declarative extension package, but no transformation runtime or sample fixtures. The intended result adds a separate PoC workspace, keeps discovery read-only, and makes approval and behavior replay explicit stages.
+Before this implementation, the repository had agent customization and a declarative extension package, but no transformation runtime or sample fixtures. The implemented automation adds a separate PoC workspace, keeps discovery read-only, and makes approval and behavior replay explicit stages. Native-host acceptance remains pending.
 
 <!-- rpi:phase id=P01 -->
 ### [x] P01: Establish the .NET baseline
@@ -114,10 +114,10 @@ Requirements:
 * Keep the runtime under `demos/legacy-code-transformation/extension/`; do not add artifacts to HVE Core's root `.github`, root `plugin.json`, or `extension/` packaging.
 * Bundle the `.agent.md` through the extension's `contributes.chatAgents` path.
 * Open each selected fixture project folder as the VS Code workspace root; load the extension separately in the extension-development host.
-* For the early demo, make the agent manually invokable with only the bounded discovery and source-evidence tools. Keep automatic model invocation disabled; expose no Foundry, edit, or execution tools.
+* Keep the agent manually invokable with automatic model invocation and nested delegation disabled. Initial read-only preview was implementation staging; P04-T02 now connects only the registered owned report and ID-only apply tools after the P03 gate exists.
 
 Details:
-* Create the custom agent at `demos/legacy-code-transformation/extension/agents/legacy-code-transformation.agent.md` and bundle it with the extension. Keep the current preview explicitly read-only and label its limitations; the full proposal and apply workflow remains unavailable.
+* Bundle the custom agent at `demos/legacy-code-transformation/extension/agents/legacy-code-transformation.agent.md`. Discovery remains read-only; proposal/application use the separate owned tools, mandatory report/exact-diff review and extension confirmation. Native agent interaction still requires P04-T02 smoke.
 * Keep the demo self-contained. Do not alter the HVE Core release, plugin synchronization, extension packaging, or documentation-generation pipelines.
 
 References:
@@ -152,7 +152,7 @@ Dependencies:
 * P01-T01.
 
 <!-- rpi:phase id=P02 -->
-### [ ] P02: Build bounded discovery and proposal reporting
+### [x] P02: Build bounded discovery and proposal reporting
 
 Goals:
 * Produce a read-only, source-grounded proposal for the selected .NET function while enforcing the supplied project-root boundary.
@@ -227,7 +227,7 @@ Requirements:
 Details:
 * Implement an extension-owned confirmation before invoking `MSBuildWorkspace` or C# language-provider commands that may load an arbitrary project. State that project evaluation and design-time `Compile`/`CoreCompile` targets may invoke custom tasks; do not imply that the separate BuildHost is a sandbox.
 * If confirmation is declined, do not invoke MSBuild Workspace or C# project-loading provider commands. Use syntax-only Roslyn parsing, bounded text search, and any editor-provider results already available; mark project-semantic references unresolved and do not present the fallback as equivalent.
-* For the early demo, expose the agent only for manual invocation with the two read-only discovery/evidence tools. It must summarize collected evidence and unknowns, not create an edit proposal or claim validation. Keep Foundry, source mutation, and project execution unavailable.
+* Discovery returns evidence and unknowns without editing or claiming validation. The initial two-tool preview was staging; generation and controlled application now belong to separate registered tools with independent gates, enabled during P04 handoff.
 * Before `MSBuildWorkspace` opens the selected project, preflight explicit project references, source includes, imports, and task-assembly paths. Reject paths that escape the selected root or cannot be proven static; report the reason and return syntax-only evidence instead.
 * Use the current Roslyn package evidence from research as the starting point. The 5.9.0 source confirms `OpenSolutionAsync` and the design-time build path; test loading only against the controlled pizza fixture during the PoC.
 * Do not describe `FindReferencesAsync` results as a complete dynamic call graph. Pair them with the bounded text/context search in P02-T01.
@@ -245,19 +245,21 @@ Dependencies:
 * P02-T01.
 
 <!-- rpi:task id=P02-T03 -->
-#### [ ] P02-T03: Generate a structured proposal report
+#### [x] P02-T03: Generate a structured proposal report
 
 Goals:
 * Produce a reviewable Markdown report that separates source evidence, observed behavior, explanation, and exact proposed changes.
 
 Requirements:
 * FR-002, FR-003, FR-004.
-* Include cited callers/references, tests, surrounding source, README/docs, original-run inputs/outputs, affected files, exact proposed edits, helper extractions, and unresolved unknowns.
+* Include cited callers/references, tests, surrounding source, README/docs, original-run inputs/outputs or an explicit `not run` status, affected files, exact proposed edits, helper-extraction limits, and unresolved unknowns.
 * Store the report under `reports/legacy-code-transformation/` inside the selected root; do not edit source while producing the report.
 * Validate the model response against a structured schema before rendering or making it available for approval.
 * Validate every model-provided evidence path/range against tool-collected evidence and every proposed change path against the selected root; reject invented citations or out-of-root changes.
 * Keep live Foundry invocation disabled until endpoint/model configuration and permission to send the supplied source context are confirmed.
-* Keep the early demo agent limited to manual, read-only discovery. Do not present it as the proposal or apply workflow planned for P02-T03/P03.
+* Default to mocked responses. Read future Foundry configuration from extension-host environment variables `api_key`, `model`, and `endpoint`; require explicit live-mode selection and extension-owned source-sharing confirmation before a request. Never persist or log the API key.
+* Keep discovery read-only. The initial preview-only boundary was implementation staging, not a final command-only restriction. After P03, P04-T02 enables owned report generation and ID-only apply with review and extension consent.
+* Expose proposal reporting through the independent `Legacy Code Transformation: Generate Proposal Report` command and the same owned generation pipeline used by the P04 report tool. No generic edit tool is exposed.
 
 The model proposal shape is a contract; the tool validates it before it may become an approval candidate:
 
@@ -312,25 +314,31 @@ The model proposal shape is a contract; the tool validates it before it may beco
 ```
 
 Details:
-* Use the direct Foundry v1 API behind an isolated adapter. Keep request construction and credentials out of the agent Markdown file.
+* Use only documented Azure OpenAI/Foundry resource OpenAI v1 chat completions behind an isolated adapter, with API-key auth. Keep request construction and credentials out of the agent Markdown file; reject project endpoints, arbitrary hosts, user information, ports, queries, and fragments.
 * Use a test double for local tests. The API/auth implementation must follow the selected endpoint family's current documentation; do not guess the Entra token audience.
-* Populate observed behavior and test results from the controlled runner/test process, never from model-generated claims.
+* Populate observed behavior and test results only from a controlled runner/test process. Until that process is explicitly run, report `not run`, never model-generated baseline outputs or test passes. The report command does not execute arbitrary projects.
 * Retrieve relevant test/documentation excerpts through `read_source_evidence`; validate each citation path and line range against tool-collected evidence before rendering.
 * The report path is a planning choice intended to keep generated evidence separate from source files; expose it as a configurable override if it conflicts with an existing project convention.
+* Validate existing realpath ancestors before creating nonexistent output parents or writing. Reject source/dependency/hidden directories and symlink ancestors; use exclusive Markdown-only writes with cancellation cleanup, no source writes or sidecar artifacts.
+* Require a unique exact target span for an edit proposal. Unresolved/ambiguous targets produce no-change reports, preserving discovery warnings independently of model prose. The mock proposes only the exact known pizza or Node banking baseline refactor; other source is an explicitly limited simulation.
 
 Guidance:
-* `demos/legacy-code-transformation/extension/src/proposal-contract.js` exports `PROPOSAL_SCHEMA`, `validateProposal`, and `renderProposalReport`. It validates citations against an evidence catalog, binds the proposal to the selected target when supplied, and does not write files or call Foundry.
-* Focused contract tests are in `demos/legacy-code-transformation/extension/tests/proposal-contract.test.js`.
+* [demos/legacy-code-transformation/extension/src/proposal-contract.js](../../../demos/legacy-code-transformation/extension/src/proposal-contract.js) exports `PROPOSAL_SCHEMA`, `validateProposal`, and `renderProposalReport`. The pipeline supplies `expectedTarget.source`; edits must replace exactly that span in one target file. The renderer preserves extension-collected context separately from model prose.
+* [demos/legacy-code-transformation/extension/src/proposal-report.js](../../../demos/legacy-code-transformation/extension/src/proposal-report.js) exports `generateProposalReport`, `writeProposalReport`, and `DEFAULT_REPORT_DIRECTORY`. The pipeline re-runs `discoverTarget` and `readSourceEvidence`; caller catalogs are never trusted.
+* [demos/legacy-code-transformation/extension/src/foundry-adapter.js](../../../demos/legacy-code-transformation/extension/src/foundry-adapter.js) exports `generateModelProposal` and `validateEndpoint`. The default mock ignores environment values and transport; live tests inject fake environment and `fetch` only.
+* [demos/legacy-code-transformation/extension/tests/proposal-pipeline.test.js](../../../demos/legacy-code-transformation/extension/tests/proposal-pipeline.test.js) covers the pipeline, writer, fake transport, and offline command. Existing contract, discovery, and manifest suites retain their owning checks.
 
 References:
 * [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md): Q5-Q6; Foundry and report findings; W6-W10, W15.
 * [.copilot-tracking/dt/getting-started/method-01-scope/scope-boundaries.md](../../dt/getting-started/method-01-scope/scope-boundaries.md): pre-edit report and approval contract.
+* [OpenAI v1 API lifecycle](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle): both accepted Azure resource hostnames and v1 path, verified 2026-10-08.
+* [Structured outputs REST documentation](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs): `api-key`, strict `response_format`, schema subset, and refusal handling, verified 2026-10-08. Unsupported numeric minimum constraints are omitted only from the wire schema; local validation remains strict.
 
 Dependencies:
 * P01-T02, P02-T01, P02-T02.
 
 <!-- rpi:phase id=P03 -->
-### [ ] P03: Enforce approval and verify the .NET change
+### [x] P03: Enforce approval and verify the .NET change
 
 Goals:
 * Apply only the exact approved proposal and compare the transformed pizza fixture against its existing tests and original representative runs.
@@ -365,7 +373,7 @@ flowchart LR
 Highlighted work: bind approval to the proposal, apply only listed edits, and compare the same .NET tests and inputs.
 
 <!-- rpi:task id=P03-T01 -->
-#### [ ] P03-T01: Bind edits to an approved proposal
+#### [x] P03-T01: Bind edits to an approved proposal
 
 Goals:
 * Prevent source changes unless the requester confirms the exact current proposal and ensure the apply operation cannot add unlisted edits.
@@ -375,8 +383,7 @@ Requirements:
 * Keep discovery tools read-only and do not expose a generic source-edit operation to the analysis agent.
 * Bind the apply request to a proposal identifier/content hash and source-file hashes; reject stale proposals or changed source.
 * Require an extension-owned confirmation for every application, independent of agent tool auto-approval settings; bind that confirmation to the proposal ID, source hashes, and exact diff.
-* Set the bundled agent `user-invocable: true` only after the apply tool and its confirmation checks are available.
-* Add the apply tool to the custom agent only after this gate is implemented.
+* Initial preview staging is complete. Register generation/apply only when extension-owned confirmation is available. Commands and the manual agent share candidates and gates; expose only the requested owned generation and ID-only apply tools alongside read-only discovery/evidence. Native chat interaction remains subject to P04-T02 smoke, not inferred from mocked tests.
 * Show the exact affected files and edits in the confirmation before application. Cancel must leave all source files unchanged.
 * Apply only the approved edits and stop for a revised report/fresh approval if changes are needed beyond them.
 
@@ -384,6 +391,13 @@ Details:
 * Keep approval state and proposed patches structured and immutable for the duration of the workflow. A generic tool invocation confirmation is not sufficient because tool approvals can be configured; the extension-owned confirmation and proposal hash are required for each write.
 * Cover approved apply, cancelled apply with no changes, stale proposal, and changed-source rejection in the extension-tool suite.
 * Keep the existing user requirement that report approval precedes code edits.
+* Capture full source bytes/hash and saved document version at generation, not apply. Retain deep-frozen candidates in memory only; exclude no-change candidates. Original report-byte changes, source changes anywhere in the file, dirty buffers, version changes, and unsafe roots/symlink paths invalidate the candidate before or after the modal and replay.
+* Resolve only the exact selected line/character span, preserving UTF-8 BOM and LF/CRLF outside it. Never accept caller edit objects or approval booleans. Keep arbitrary project apply disabled until equivalent controlled verification is configured.
+
+Guidance:
+* [demos/legacy-code-transformation/extension/src/proposal-report.js](../../../demos/legacy-code-transformation/extension/src/proposal-report.js) `generateProposalReport` returns validated `proposal`, `target`, `evidenceCatalog`, `reportPath`, `reportHash`, `proposalHash`, `targetSpanHash`, `evidenceHash` and full `sourceSnapshot`. The store retains an immutable structured snapshot rather than trusting rendered prose or caller assertions.
+* `proposalHash` hashes validated proposal JSON; `evidenceHash` binds the catalog. `targetSpanHash` hashes normalized excerpt text, not full source bytes, and may be `null` for unresolved no-change targets. `sourceSnapshot.fileHash` binds complete saved bytes/version; `reportHash` binds original report bytes. All are revalidated before writes; none is an approval token.
+* [demos/legacy-code-transformation/extension/src/extension.js](../../../demos/legacy-code-transformation/extension/src/extension.js) registers generation command/tool and review command/ID-only apply against one `ProposalCandidateStore`. `registerProposalReportTool` and `registerProposalApply` require independent extension confirmation support.
 
 References:
 * [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md): approval finding and W9; user scope evidence C4.
@@ -393,7 +407,7 @@ Dependencies:
 * P02-T03.
 
 <!-- rpi:task id=P03-T02 -->
-#### [ ] P03-T02: Replay and compare the .NET fixture
+#### [x] P03-T02: Replay and compare the .NET fixture
 
 Goals:
 * Demonstrate that the approved pizza refactor passes the same existing tests and representative inputs captured against the original fixture.
@@ -406,6 +420,13 @@ Requirements:
 
 Details:
 * Use the baseline from P01-T02 and preserve the exact representative input set across both versions.
+* Before changing selected source, run the original and exact proposed pizza replacement on an isolated disposable copy of six fingerprint-checked fixture files. Never build mutable unknown project files or execute other replacements. Fixed arguments, no shell, explicit public-source NuGet configuration, disabled inherited MSBuild imports, finite timeout, output bounds and cancellation constrain the controlled harness.
+* Record extension-owned test/run stdout, stderr, exit codes and visible working-directory files in a separate safe Markdown verification report; preserve the reviewed proposal report hash. Test log durations vary, so compare test counts/exits/errors and exact representative replay output, not raw test log equality. External/network/timing effects and uncovered inputs remain unknown; disposable copies are not an OS sandbox.
+* On mismatch, launch failure, timeout or cancellation leave selected source unchanged and require a revised proposal. Revalidate full source hashes and saved versions after confirmation/replay and before the exact write; do not repair outside approval or roll back concurrent edits.
+
+Guidance:
+* [demos/legacy-code-transformation/extension/src/proposal-apply.js](../../../demos/legacy-code-transformation/extension/src/proposal-apply.js) exports `ProposalCandidateStore`, `ApplyProposalTool`, generation snapshot helpers, `spanOffsets` and `replacementBytes`. Apply accepts only the store-issued ID; the verification dependency is extension-owned, not tool input.
+* [demos/legacy-code-transformation/extension/src/fixture-replay.js](../../../demos/legacy-code-transformation/extension/src/fixture-replay.js) preserves `verifyPizzaProposal`, `runDotnet`, `PIZZA_CASES`, `renderVerificationReport` and adds `verifyNodeProposal`, `runNode`, `verifyControlledProposal`. `readControlledFixture`/`assertFixtureHashes` select separate pinned pizza/Node definitions. The store defaults to the generic verifier; other replacements/projects are unsupported.
 
 References:
 * [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md): Q6 and Contrarian finding on test evidence versus proof.
@@ -463,6 +484,14 @@ Requirements:
 
 Details:
 * Use the VS Code TypeScript provider commands only after the target root is open and project loading is complete. Do not assume the target's Node runtime version determines the installed TypeScript service version.
+* Use a correct nested legacy function with an exact known guard-clause mock replacement. Pin the owned Node source, runner, test cases and project metadata; reject unsupported harnesses/replacements before any process. Run eight reset-state tests and eight transfer inputs plus a fixed CLI error on disposable baseline/transformed copies; compare JSON results/balances, stdout/stderr/exits and visible working-directory files.
+* Use native Node spawn with no shell, restricted environment excluding model/auth values and `NODE_OPTIONS`, finite timeout, bounded output and cancellation. Keep both bundled fixture sources unchanged during tests. Installed `v24.19.0` satisfies the runtime target; native TypeScript provider version/readiness remains a P04-T02 smoke requirement.
+
+Guidance:
+* Reuse the immutable snapshot, candidate, exact-span, report-hash and modal gate in [demos/legacy-code-transformation/extension/src/proposal-apply.js](../../../demos/legacy-code-transformation/extension/src/proposal-apply.js). Add equivalent owned Node fixture verification before enabling Node apply; do not bypass the current pizza-only preflight.
+* [demos/legacy-code-transformation/extension/src/fixture-replay.js](../../../demos/legacy-code-transformation/extension/src/fixture-replay.js) provides the disposable-copy pattern, fixed process execution, cancellation/timeouts, observed evidence, and fixture rechecks. Its fingerprints/replacement/input set are pizza-specific and must not be reused as Node evidence.
+* [demos/legacy-code-transformation/extension/src/node-fixture.js](../../../demos/legacy-code-transformation/extension/src/node-fixture.js) exports `NODE_TARGET_PATH`, `NODE_BASELINE`, `NODE_REPLACEMENT`, `NODE_HASHES`, `NODE_CASES` independently of pizza. The controlled Node fixture is [demos/legacy-code-transformation/fixtures/node](../../../demos/legacy-code-transformation/fixtures/node), with explicit `jsconfig.json` and dependency-free builtin tests.
+* The generic replay selector uses separate definitions, not pizza fingerprints as Node evidence. `verifyNodeProposal` and `runNode` own Node execution; `verifyControlledProposal` selects the verifier. Existing pipeline/apply tests cover provider doubles and real disposable verification, not real host readiness.
 
 References:
 * [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md): Q3; W13-W14; provider version/capability limitations.
@@ -482,10 +511,18 @@ Requirements:
 * The demo README explains how to open the sample workspace, run the fixture tests, use the agent, and review/apply an approved proposal.
 * State the Foundry live-call prerequisites and keep source-data permission, endpoint/model configuration, and credentials outside tracked artifacts.
 * Summarize known limits: no complete dynamic call graph, no formal equivalence proof, no Java support, and no unrestricted arbitrary-project execution.
+* Complete the agent experience using the registered owned generation and ID-only apply tools sharing the commands' store. Keep manual invocation enabled and automatic invocation/delegation disabled; require report/exact-diff inspection and user application request before the independent extension-owned modal. Reports/model content remain untrusted data.
 
 Details:
 * Perform an end-to-end manual smoke in the VS Code extension development host: discovery report, explicit approval, exact edit application, and before/after test/replay for .NET and Node.
 * Do not add the demo runtime to HVE Core plugin membership or VSIX packaging unless separately planned and approved.
+* README and standalone launch recipes are implemented and automated gates passed. Stop before real host interaction in the current invocation; leave this task and P04 unchecked until separately authorized native smoke. No new servers/browser/model/service setup, provisioning, credentials reading or live Foundry calls are authorized.
+* Verify both fixtures on pristine disposable copies. Approved replacement works once per baseline fingerprint; use a new copy for another demonstration, not rollback or a generic transformation. Frontmatter/public-feed owners remain unavailable without `pwsh`; do not install tools implicitly.
+
+Guidance:
+* [demos/legacy-code-transformation/extension/src/extension.js](../../../demos/legacy-code-transformation/extension/src/extension.js) exports `GENERATE_REPORT_TOOL`, `GenerateProposalReportTool`, `registerProposalReportTool`, `registerProposalReportCommand`, `registerProposalApply`. Generation returns status/mode/candidate ID/path/hashes only and uses owned reads; commands/tools share immutable candidates.
+* [demos/legacy-code-transformation/extension/.vscode/launch.json](../../../demos/legacy-code-transformation/extension/.vscode/launch.json) prompts for disposable pizza/Node fixture roots without changing root configuration. [demos/legacy-code-transformation/README.md](../../../demos/legacy-code-transformation/README.md) is the shipped setup/review/live-prerequisite handoff.
+* [demos/legacy-code-transformation/extension/tests/manifest.test.js](../../../demos/legacy-code-transformation/extension/tests/manifest.test.js) checks exact requested registrations and launch recipes; pipeline/apply suites own report binding, cancellation and real controlled replay. Full automation does not certify native picker/dialog/provider behavior.
 
 References:
 * [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md): recommendation, risks, and Planning Readiness gates.
@@ -511,7 +548,7 @@ Dependencies:
 | --- | --- | --- | --- | --- | --- | --- |
 | D1 | Use a small VS Code extension-contributed tool provider for executable workspace/language-provider operations; keep the custom agent declarative. | Resolved | Agent | Extension tools directly use VS Code workspace APIs and commands. MCP remains an alternative if cross-editor reuse becomes a requirement. | RPI research W8-W10; extension/PACKAGING.md | Shapes the runtime boundary and separate demo location. |
 | D2 | Require the selected project root to be an opened workspace folder and fail closed on external project references. | Resolved | Agent | C# Dev Kit and TypeScript services load workspace/project context; explicit validation is required to preserve the user-supplied root boundary. | RPI research W3, W9, W12-W14 | Adds root/URI boundary checks and an external-reference validation gate. |
-| D3 | Use a configurable Foundry v1 REST adapter with API-key auth stored in VS Code SecretStorage; keep live calls disabled until endpoint/model and source-data permission are confirmed. | Resolved for the PoC adapter | Agent | The API-key route is documented and avoids choosing an Entra audience before the endpoint family is known. The user has not authorized sending non-demo code. | RPI research W6-W7, W9; RPI research Q5 | Supports mock tests and configurable live use without recording credentials or invoking an unknown deployment. |
+| D3 | Use a mock-default Foundry v1 REST adapter with API-key auth read from extension-host environment variables `api_key`, `model`, and `endpoint`; require explicit live selection and source-sharing confirmation. | Resolved for the PoC adapter | User | User requested mocked responses for now and future environment-configured Foundry calls on 2026-10-08. No live calls are authorized in this implementation session. | RPI research W6-W7, W9; current user request | Replaces the SecretStorage planning choice with environment configuration; preserves source-sharing and endpoint validation gates. |
 | D4 | Bundle the agent through the standalone demo extension's `contributes.chatAgents` path; keep runtime and fixtures separate from HVE Core's plugin packaging. | Resolved | Agent | VS Code supports extension-bundled agents, while HVE plugin discovery is rooted in tracked `.github` paths. | RPI research W16, C1-C2, C5; extension/PACKAGING.md | Avoids HVE plugin membership changes and keeps the agent/tool runtime together. |
 | D5 | Write generated reports under `reports/legacy-code-transformation/` in the selected project root by default, with a configurable destination. | Resolved | Agent | Keeps the pre-edit report separate from source files while preserving the user-supplied project-root boundary. | Confirmed report-before-edit workflow; RPI research C4 | Defines report output without editing source before approval. |
 
@@ -519,16 +556,16 @@ Dependencies:
 
 | Field | Record |
 | --- | --- |
-| Planning execution and readiness | Complete; P01 is complete and P02 is ready to begin, with root/provider/execution and live-Foundry gates explicit. |
+| Planning execution and readiness | Complete planning; implementation Partial. P01-P03 and P04-T01 automation complete; only P04-T02 native smoke remains after separate permission. |
 | Decision participation | Agent-owned; automatic RPI Agent context. |
-| Blockers | No planning blocker. Live Foundry invocation remains gated on endpoint/auth configuration and permission to send non-demo source. |
+| Blockers | Real extension-host smoke is explicitly not authorized here; native TypeScript readiness/version remains unverified. Frontmatter/public-feed owners require unavailable `pwsh`. Live compatibility is a separate optional source-sharing/configuration prerequisite. |
 | Latest critique | [.copilot-tracking/reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md](../../reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md), Pass. |
 | Relevant research | [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md) |
 | Plan | `.copilot-tracking/plans/2026-10-07/legacy-code-transformation-agent-plan.md` |
-| Changes-record role | `.copilot-tracking/changes/2026-10-07/legacy-code-transformation-agent-changes.md` will be implementation evidence. |
+| Changes-record role | [.copilot-tracking/changes/2026-10-07/legacy-code-transformation-agent-changes.md](../../changes/2026-10-07/legacy-code-transformation-agent-changes.md) records P01-P04 automation, current exports, 70/70 extension tests, 8/8 Node tests, Markdown pass and manual/tooling gaps; full plan remains Partial. |
 | Continuation owner | Active automatic RPI Agent. |
-| Required gates or confirmations | Root confinement; controlled .NET original/refactored replay; installed TypeScript provider smoke test; proposal-bound approval; source-data permission and endpoint-specific authentication before live Foundry invocation. |
-| Next action | Active automatic RPI Agent continues with P02-T02; live Foundry invocation remains gated on endpoint/model configuration and source-data permission. |
+| Required gates or confirmations | Automated root confinement, report/source binding, independent exact approval and real .NET/Node replay pass. Native agent/dialog/TypeScript smoke remains; exact-context source sharing and supported live resource configuration remain separate. |
+| Next action | After automation review, obtain separate permission for P04-T02 native development-host smoke of both disposable fixture copies. Do not launch hosts or live calls implicitly. Node runtime matches `v24.19.0`; no runtime installation gap exists. |
 
 ## Goals
 
@@ -554,7 +591,7 @@ Dependencies:
 
 * Canonical PoC source changes stay under `demos/legacy-code-transformation/`; remove or modify no existing HVE Core plugin, extension, agent, or test files.
 * HVE Core test ownership is unchanged. Demo-owned coverage is limited to one .NET behavior suite, one extension-tool contract/integration suite, and one Node behavior/provider suite. Add cases only for confirmed behavior and material safety boundaries.
-* The only runtime-generated artifact is the Markdown proposal report under the selected project's configured report directory. Do not commit build outputs or generated reports as fixtures.
+* Runtime-generated artifacts are Markdown proposal and separate controlled-verification reports under the selected project's safe artifact directory. Candidates remain memory-only. Do not commit build outputs or generated reports as fixtures.
 * Existing tests plus semantic behavior and boundary tests are in scope; unrelated refactoring and broad hardening are not.
 
 ## Functional Requirements
@@ -581,7 +618,7 @@ Dependencies:
 | High | Risk | Roslyn solution/project loading may resolve project references outside the selected root. | P02-T01, P02-T02 | Violates the user's explicit discovery boundary. | Fail closed on external project references; test canonicalized root and result URI filtering. | Planner/implementer |
 | High | Risk | Running build/test targets or arbitrary selected code can execute project-controlled behavior. | P01-T02, P03-T02 | Potential local side effects and non-repeatable results. | Keep execution to controlled fixtures; require explicit approval and document the isolation boundary. | Planner/implementer |
 | Medium | Open question | Installed C# and TypeScript language providers may be absent, loading, or capability-gated. | P02-T02, P04-T01 | Caller data may be incomplete. | Probe provider readiness and surface unavailable/incomplete evidence. | Implementer |
-| Medium | User/environment prerequisite | Foundry endpoint/model deployment and source-code data policy are unspecified; API-key storage is the selected PoC auth path. | P02-T03 | Live invocation cannot be verified without environment configuration and authorization. | Implement configurable adapter with mocks; require endpoint/model and permission before live use. If the endpoint requires Entra, reopen D3 before implementation. | User/environment |
+| Medium | User/environment prerequisite | Live resource/model compatibility and source-code data policy remain unverified; extension-host environment API-key configuration is the selected PoC auth path. | P02-T03 | Live invocation cannot be verified without separate configuration and authorization. | The mock/fake-transport adapter is complete. Live use requires a supported resource endpoint, deployed structured-output model, and exact-context sharing permission. If Entra or a different endpoint family is required, reopen D3 rather than guessing an audience. | User/environment |
 
 ## Dependencies
 
@@ -599,6 +636,7 @@ Dependencies:
 * [.github/agents/design-thinking/dt-coach.agent.md](../../../.github/agents/design-thinking/dt-coach.agent.md): workspace agent tool declarations and DT handoff context.
 * [package.json](../../../package.json): available repository validation and test scripts; no project implementation command selected yet.
 * [VS Code contribution points](https://code.visualstudio.com/api/references/contribution-points): the extension can contribute its bundled custom agent through `contributes.chatAgents`.
+* [OpenAI v1 API lifecycle](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle) and [structured outputs REST documentation](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs): resource endpoint, API-key request, response-schema subset, and refusal contract for P02-T03.
 
 ## Critique Disposition
 
@@ -611,7 +649,7 @@ Dependencies:
 | Critique run and finding | Disposition | Action owner | Exact resolving evidence | Decision route | Plan response or residual risk |
 | --- | --- | --- | --- | --- | --- |
 | Initial standard PC-001, explicit human approval | Resolved; verified by follow-up Pass | Planning parent | Follow-up critique confirms P03-T01 requires extension-owned confirmation independent of tool auto-approval, exact proposal/source hashes, and cancel/stale-source tests. | Direct planner correction | Source edits require the extension-owned confirmation on every apply. |
-| Initial standard PC-002, Foundry auth risk conflict | Resolved; verified by follow-up Pass | Planning parent | D3 and Risks and Open Questions select SecretStorage API-key handling while leaving endpoint/model/source permission as live-call prerequisites. | Direct planner correction | Risk row distinguishes the selected auth path from live-call prerequisites. |
+| Initial standard PC-002, Foundry auth risk conflict | Resolved; verified by historical follow-up Pass | Planning parent | Earlier D3 selected SecretStorage; the user's 2026-10-08 environment direction supersedes that storage choice. Current D3 and the risk row agree on environment API-key handling and separate live-call prerequisites. | Direct planner correction, then explicit user update | Historical critique is not live runtime verification; fake-transport tests validate the current adapter boundaries. |
 | Follow-up standard critique, revised approval and auth boundaries | Pass; no new findings | Planning parent | .copilot-tracking/reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-2.md | No further revision required | Plan is ready for implementation; runtime gates remain explicit. |
 | Post-critique packaging refinement: extension-contributed agent | Pass; no new findings | Planning parent | [.copilot-tracking/reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md](../../reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md) confirms W16/C5 supports the bundled-agent path. | No further revision required | P01 is complete; P02-T01 is eligible to proceed. |
 
@@ -629,7 +667,7 @@ Dependencies:
 * [x] Critique setting, status, findings, dispositions, readiness, continuation owner, gates, and next action are current.
 * [x] Follow-Up Items remain outside active plan completion.
 * Checked sections: task metadata, executive summary, phase/task blocks and diagrams, decisions, readiness, requirements, risks, critique dispositions, sources, and handoff.
-* Missing or limited sections: diagrams were not rendered in light/dark themes; runtime behavior remains unverified until implementation.
+* Missing or limited sections: diagrams were not rendered in light/dark themes; P01-P04 automation is validated but real host UI/installed TypeScript provider interaction and optional live invocation remain unverified. `pwsh`-owned frontmatter/public-feed checks are unavailable; human acceptance remains outstanding.
 
 ## Follow-Up Items
 

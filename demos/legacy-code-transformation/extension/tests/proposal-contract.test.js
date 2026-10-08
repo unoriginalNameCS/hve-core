@@ -81,3 +81,20 @@ test('proposal validation rejects a different target and ungrounded replacement 
   inventedOriginal.changes[0].originalText = 'return 9m;';
   assert.match(validateProposal(inventedOriginal, evidence).errors.join(' '), /originalText was not found/);
 });
+
+test('proposal validation rejects empty, disjoint, and outside-target anchors', () => {
+  const candidate = proposal();
+  candidate.changes[0].originalText = '';
+  assert.equal(validateProposal(candidate, evidence).valid, false);
+  candidate.changes[0].originalText = 'first\nsecond';
+  const disjoint = ['first', 'second'].map((content, index) => ({ ...evidence[0], id: `E${index}`, content }));
+  assert.equal(validateProposal(candidate, disjoint).valid, false);
+  candidate.changes[0].originalText = 'return 1m;';
+  const selected = { ...candidate.target, source: { text: evidence[0].content } };
+  assert.match(validateProposal(candidate, evidence, selected).errors.join(' '), /exactly the selected target span/);
+  candidate.changes[0].originalText = evidence[0].content;
+  assert.equal(validateProposal(candidate, evidence, selected).valid, true);
+  assert.equal(validateProposal(candidate, evidence, { ...selected, source: null }).valid, false);
+  candidate.changes[0].path = 'src/Other.cs';
+  assert.equal(validateProposal(candidate, [...evidence, { ...evidence[0], id: 'E2', path: 'src/Other.cs' }], selected).valid, false);
+});

@@ -97,7 +97,7 @@ function validateProposal(proposal, evidenceCatalog, expectedTarget) {
     if (!isNormalizedRelativePath(item.path) || typeof item.content !== 'string') {
       continue;
     }
-    collectedSourceByPath.set(item.path, [collectedSourceByPath.get(item.path) ?? '', item.content].join('\n'));
+    collectedSourceByPath.set(item.path, [...(collectedSourceByPath.get(item.path) ?? []), item.content]);
   }
   if (!Array.isArray(proposal.evidence)) {
     fail('evidence must be an array.');
@@ -130,6 +130,9 @@ function validateProposal(proposal, evidenceCatalog, expectedTarget) {
   if (!Array.isArray(proposal.changes)) {
     fail('changes must be an array.');
   } else {
+    if (expectedTarget && proposal.changes.length > 1) {
+      fail('Only one target-span replacement is supported.');
+    }
     proposal.changes.forEach((change, index) => {
       const label = `changes[${index}]`;
       if (!hasExactKeys(change, ['path', 'originalText', 'replacementText', 'rationale'])) {
@@ -146,9 +149,18 @@ function validateProposal(proposal, evidenceCatalog, expectedTarget) {
           fail(`${label}.${field} must be a string.`);
         }
       }
+      if (typeof change.originalText === 'string' && change.originalText.trim().length === 0) {
+        fail(`${label}.originalText must be non-empty.`);
+      }
+      if (expectedTarget && change.path !== expectedTarget.path) {
+        fail(`${label}.path must match the selected target file.`);
+      }
+      if (expectedTarget && Object.hasOwn(expectedTarget, 'source') &&
+          (!expectedTarget.source || change.originalText !== expectedTarget.source.text)) {
+        fail(`${label} must replace exactly the selected target span.`);
+      }
       if (typeof change.path === 'string' && typeof change.originalText === 'string' &&
-          change.originalText.length > 0 &&
-          !collectedSourceByPath.get(change.path)?.includes(change.originalText)) {
+          !collectedSourceByPath.get(change.path)?.some((content) => content.includes(change.originalText))) {
         fail(`${label}.originalText was not found in collected source evidence.`);
       }
     });
@@ -162,6 +174,7 @@ function validateProposal(proposal, evidenceCatalog, expectedTarget) {
 }
 
 function codeSpan(value) {
+  value = String(value).replace(/[\r\n]/g, ' ').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   const runs = [...String(value).matchAll(/`+/g)].map((match) => match[0].length);
   const fence = '`'.repeat(Math.max(0, ...runs) + 1);
   const padding = String(value).startsWith('`') || String(value).endsWith('`') ? ' ' : '';
@@ -182,7 +195,7 @@ function textFence(value) {
   return `${fence}text\n${value}\n${fence}`;
 }
 
-function renderProposalReport(proposal, evidenceCatalog, expectedTarget) {
+function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collectedContext) {
   const validation = validateProposal(proposal, evidenceCatalog, expectedTarget);
   if (!validation.valid) {
     throw new Error(`Proposal validation failed: ${validation.errors.join(' ')}`);
@@ -191,6 +204,8 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget) {
   const catalog = new Map((evidenceCatalog ?? []).map((item) => [item.id, item]));
   const lines = [
     '# Legacy Code Refactor Proposal',
+    '',
+    '## Model Proposal (Unverified)',
     '',
     escapeText(proposal.summary),
     '',
@@ -210,6 +225,7 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget) {
   }
 
   lines.push('', '## Proposed Changes', '');
+  if (proposal.changes.length === 0) lines.push('No changes proposed.', '');
   for (const [index, change] of proposal.changes.entries()) {
     lines.push(`### Change ${index + 1}: ${codeSpan(change.path)}`, '');
     lines.push(`Rationale: ${escapeText(change.rationale)}`, '', 'Original:', '', textFence(change.originalText), '', 'Replacement:', '', textFence(change.replacementText), '');
@@ -222,6 +238,34 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget) {
     lines.push(...proposal.unknowns.map((unknown) => `* ${escapeText(unknown)}`));
   }
   lines.push('', '> This report is a proposal only. No source files were changed or validated by rendering it.', '');
+  if (collectedContext) {
+    const discovery = collectedContext.discovery;
+    lines.push('## Extension-Collected Context', '',
+      `Mode: ${collectedContext.mode === 'mock' ? 'SIMULATION (offline mock; no model request)' : 'Live model (unverified proposal)'}`, '',
+      'Observed baseline inputs/outputs: not run. Existing tests: not run. No equivalence claim.', '',
+      'Helper extraction: unsupported outside the selected target span.', '',
+      `Proposal SHA-256: ${codeSpan(collectedContext.proposalHash)}`, '',
+      `Normalized target-span SHA-256 (not a full-file hash): ${codeSpan(collectedContext.targetSpanHash ?? 'unavailable')}`, '',
+      `Evidence catalog SHA-256: ${codeSpan(collectedContext.evidenceHash)}`, '',
+      '### Discovery Provenance And Limits', '',
+      textFence(JSON.stringify({
+        resolution: discovery.target.resolution,
+        analysisMode: discovery.analysisMode ?? 'editor providers',
+        references: discovery.references ?? [],
+        incomingCalls: discovery.incomingCalls ?? [],
+        outgoingCalls: discovery.outgoingCalls ?? [],
+        roslynAnalysis: discovery.roslynAnalysis ?? null,
+        syntaxAnalysis: discovery.syntaxAnalysis ?? null,
+        textMatches: discovery.textMatches ?? [],
+        warnings: discovery.warnings ?? [],
+        evidenceBoundary: discovery.evidenceBoundary,
+        exclusions: '.git, node_modules, bin, obj, dist, build, coverage',
+        limits: 'Static results are not a complete dynamic call graph. Missing providers/results do not prove absence of callers. Evidence collection is bounded to 40 excerpts and eight locations per kind.'
+      }, null, 2)), '', '### Validated Source Catalog', '');
+    for (const source of evidenceCatalog) {
+      lines.push(`* ${codeSpan(source.id)} ${codeSpan(source.path)}:${source.startLine}-${source.endLine} (${escapeText(source.kind)})`, '', textFence(source.content), '');
+    }
+  }
   return lines.join('\n');
 }
 

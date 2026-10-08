@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Legacy transformation: Pizza fixture copy",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${input:pizzaRoot}"]
+    },
+    {
+      "name": "Legacy transformation: Node fixture copy",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}", "${input:nodeRoot}"]
+    }
+  ],
+  "inputs": [
+    { "id": "pizzaRoot", "type": "promptString", "description": "Absolute path to a disposable copy of fixtures/dotnet (without bin/obj)" },
+    { "id": "nodeRoot", "type": "promptString", "description": "Absolute path to a disposable copy of fixtures/node" }
+  ]
+}

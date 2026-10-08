@@ -26,7 +26,8 @@ function collectDocumentSymbols(symbols, documentUri, collected = []) {
         name: symbol.name,
         kind: symbol.kind,
         uri,
-        range
+        range,
+        sourceRange: symbol.range ?? location?.range
       });
     }
 
@@ -63,10 +64,15 @@ function sourceExcerpt(content, range) {
   const lines = content.split(/\r?\n/);
   const startLine = Math.max(0, range.start.line);
   const endLine = Math.min(lines.length - 1, range.end.line);
+  const excerpt = lines.slice(startLine, endLine + 1);
+  excerpt[excerpt.length - 1] = excerpt.at(-1).slice(0, range.end.character);
+  excerpt[0] = excerpt[0].slice(range.start.character);
   return {
     startLine: startLine + 1,
     endLine: endLine + 1,
-    text: lines.slice(startLine, endLine + 1).join('\n')
+    startCharacter: range.start.character,
+    endCharacter: range.end.character,
+    text: excerpt.join('\n')
   };
 }
 
@@ -318,10 +324,12 @@ async function discoverTarget(vscode, input, token, roslynAnalyzer = runRoslynAn
   }
 
   const targetSymbol = targetSymbols[0];
-  result.target.source = sourceExcerpt(
-    contentByRelativePath.get(targetRelativePath) ?? '',
-    targetSymbol.range
-  );
+  if (targetSymbol.sourceRange && await relativeEvidencePath(root, targetSymbol.uri) === targetRelativePath) {
+    result.target.source = sourceExcerpt(
+      contentByRelativePath.get(targetRelativePath) ?? '',
+      targetSymbol.sourceRange
+    );
+  }
   result.references = [];
   result.incomingCalls = [];
   result.outgoingCalls = [];

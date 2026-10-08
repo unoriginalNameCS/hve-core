@@ -1,0 +1,7 @@
+{
+  "name": "legacy-banking-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "node": "24.19.x" },
+  "scripts": { "test": "node --test tests/transfer.test.js" }
+}
