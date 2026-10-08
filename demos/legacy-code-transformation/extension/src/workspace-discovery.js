@@ -99,7 +99,8 @@ async function rootBoundWorkerLocations(root, vscode, locations) {
     }
     const evidencePath = await relativeEvidencePath(root, uri);
     if (evidencePath !== null) {
-      results.push({ path: evidencePath, line: location.line, kind: location.kind });
+      results.push({ path: evidencePath, line: location.line, kind: location.kind,
+        ...(location.sourceRange ? { sourceRange: location.sourceRange } : {}) });
     }
   }
   return results;
@@ -270,7 +271,8 @@ async function discoverTarget(vscode, input, token, roslynAnalyzer = runRoslynAn
       targetUri
     );
     const matchingSymbols = collectDocumentSymbols(documentSymbols, targetUri)
-      .filter((symbol) => symbol.name === input.targetSymbol);
+      .filter((symbol) => symbol.name === input.targetSymbol &&
+        symbol.kind !== (vscode.SymbolKind?.Property ?? 6));
     for (const symbol of matchingSymbols) {
       if (await isUriWithinRoot(root, symbol.uri)) {
         targetSymbols.push(symbol);
@@ -311,6 +313,10 @@ async function discoverTarget(vscode, input, token, roslynAnalyzer = runRoslynAn
     if (targetCandidates.length === 1) {
       result.target.resolution = 'unique';
       result.target.candidates = targetCandidates;
+      const candidate = targetCandidates[0];
+      if (candidate.path === targetRelativePath && candidate.sourceRange) {
+        result.target.source = sourceExcerpt(contentByRelativePath.get(targetRelativePath) ?? '', candidate.sourceRange);
+      }
     }
   }
   if (targetSymbols.length !== 1) {

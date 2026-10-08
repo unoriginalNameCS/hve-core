@@ -155,6 +155,37 @@ test('discovery reads and reports only files and provider results inside the sel
   assert.ok(result.textMatches.every((match) => !match.path.startsWith('../')));
 });
 
+test('discovery excludes export properties but keeps duplicate function declarations ambiguous', async (context) => {
+  const rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-export-symbol-'));
+  context.after(() => fs.rm(rootPath, { recursive: true, force: true }));
+  const targetPath = path.join(rootPath, 'transfer.js');
+  const declaration = 'function transfer() {}';
+  await fs.writeFile(targetPath, `${declaration}\nmodule.exports = { transfer };`);
+  const targetUri = makeUri(targetPath);
+  const functionRange = { start: { line: 0, character: 0 }, end: { line: 0, character: declaration.length } };
+  const exportRange = { start: { line: 1, character: 19 }, end: { line: 1, character: 27 } };
+  const providerResults = {
+    'vscode.executeDocumentSymbolProvider': [
+      { name: 'transfer', kind: 11, range: functionRange },
+      { name: 'module.exports', kind: 12, range: exportRange, children: [
+        { name: 'transfer', kind: 6, range: exportRange }
+      ] }
+    ],
+    'vscode.executeReferenceProvider': [{ uri: targetUri, range: exportRange }]
+  };
+  const vscode = makeVscode({ uri: makeUri(rootPath) }, [targetUri], providerResults, []);
+  const input = { projectRoot: rootPath, targetFile: targetPath, targetSymbol: 'transfer' };
+  const result = await discoverTarget(vscode, input);
+  assert.equal(result.target.resolution, 'unique');
+  assert.equal(result.target.source.text, declaration);
+  assert.deepEqual(result.references, [{ path: 'transfer.js', line: 2 }]);
+  assert.equal(result.textMatches.length, 2);
+  providerResults['vscode.executeDocumentSymbolProvider'].push({ name: 'transfer', kind: 11, range: exportRange });
+  const ambiguous = await discoverTarget(vscode, input);
+  assert.equal(ambiguous.target.resolution, 'ambiguous');
+  assert.equal(ambiguous.target.candidates.length, 2);
+});
+
 test('declining C# project-load confirmation returns syntax-only results without invoking providers', async (context) => {
   const rootPath = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-csharp-decline-'));
   context.after(() => fs.rm(rootPath, { recursive: true, force: true }));
@@ -276,6 +307,13 @@ test('controlled pizza discovery invokes Roslyn and returns its in-root caller',
   assert.equal(vscode.confirmationRequests.length, 1);
   assert.equal(result.analysisMode, 'msbuild-workspace');
   assert.equal(result.target.resolution, 'unique');
+  assert.equal(result.target.source.startLine, 14);
+  assert.equal(result.target.source.startCharacter, 4);
+  assert.match(result.target.source.text, /^public static decimal CalculateDiscountAmount/);
+  assert.match(result.target.source.text, /return discountAmount;\n    \}$/);
+  const generated = await require('../src/foundry-adapter').generateModelProposal({ target: result.target, evidenceCatalog: [] });
+  assert.equal(generated.proposal.changes.length, 1);
+  assert.equal(generated.proposal.changes[0].originalText, result.target.source.text);
   assert.deepEqual(result.roslynAnalysis.references, [
     { path: 'src/PizzaEligibility/Program.cs', line: 12, kind: 'reference' }
   ]);

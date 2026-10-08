@@ -28,6 +28,18 @@ test('package and lock names remain aligned', () => {
   assert.equal(lock.version, manifest.version);
 });
 
+test('all owned tools are exposed to chat using the agent allowlist names', () => {
+  const agentContent = fs.readFileSync(path.join(extensionRoot, manifest.contributes.chatAgents[0].path), 'utf8');
+  const referenceNames = new Set();
+  for (const tool of manifest.contributes.languageModelTools) {
+    assert.equal(tool.canBeReferencedInPrompt, true);
+    assert.equal(tool.toolReferenceName, tool.name);
+    assert.ok(agentContent.split(/\r?\n/).includes(`  - ${tool.toolReferenceName}`));
+    assert.ok(!referenceNames.has(tool.toolReferenceName));
+    referenceNames.add(tool.toolReferenceName);
+  }
+});
+
 test('read-only tool manifest entries match their runtime registrations', () => {
   const registeredNames = [];
   const context = { subscriptions: [] };

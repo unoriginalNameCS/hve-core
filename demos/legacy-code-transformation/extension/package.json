@@ -47,6 +47,8 @@
     "languageModelTools": [
       {
         "name": "legacy_code_transformation_demo_generate_proposal_report",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_code_transformation_demo_generate_proposal_report",
         "displayName": "Generate a source-grounded proposal report",
         "modelDescription": "Recollect bounded saved source and evidence through owned routines, validate one exact target proposal and write a unique Markdown report after extension-owned report confirmation. Default mock never reads environment or calls transport. Live mode requires explicit user request and separate exact-context sharing consent. Returns candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply. No tests or source writes during generation.",
         "userDescription": "Confirm report creation, review the generated report, then separately approve application if wanted.",
@@ -65,6 +67,8 @@
       },
       {
         "name": "legacy_code_transformation_demo_apply_proposal",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_code_transformation_demo_apply_proposal",
         "displayName": "Review and apply stored proposal",
         "modelDescription": "Accept only an extension-owned proposal ID from generation in this session after the user reviews the report and requests application. Mandatory extension modal shows exact file, original, replacement, diff and hashes, independently of tool auto-approval. Applies only known hash-verified pizza or Node replacements after disposable before/after tests and replay. No caller patches or approval flags.",
         "userDescription": "Confirm an exact stored proposal, verify controlled fixture behavior on a disposable copy, then apply only if source and report remain current.",
@@ -78,6 +82,8 @@
       },
       {
         "name": "legacy_code_transformation_demo_discover_target",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_code_transformation_demo_discover_target",
         "displayName": "Discover target context",
         "modelDescription": "Read-only discovery for one function or class in the exact open project root. Returns in-root document symbols, references, call hierarchy when available, and bounded text matches. C# analysis requires confirmation because MSBuild design-time targets may run project-defined tasks; declining uses syntax-only Roslyn analysis and bounded text evidence.",
         "userDescription": "Collect source-grounded evidence; C# provider analysis asks before project loading.",
@@ -104,6 +110,8 @@
       },
       {
         "name": "legacy_code_transformation_demo_read_source_evidence",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_code_transformation_demo_read_source_evidence",
         "displayName": "Read source evidence",
         "modelDescription": "Read a requested one-based line range from normalized project-relative paths in the exact open project root. Use only for paths identified by bounded discovery. This tool is read-only and never reads outside the root.",
         "userDescription": "Read focused source, test, README, or documentation excerpts inside the selected project root.",

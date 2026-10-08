@@ -223,7 +223,7 @@ test('controlled runner bounds timeout, cancellation and failed launch without a
   let cancel;
   let killed = false;
   const spawnFake = (command, args, options) => {
-    assert.ok(command === 'dotnet' || command === process.execPath);
+    assert.ok(command === 'dotnet' || command === 'node');
     assert.equal(options.shell, false);
     assert.equal(options.env.api_key, undefined);
     assert.equal(options.env.model, undefined);
@@ -248,6 +248,24 @@ test('controlled runner bounds timeout, cancellation and failed launch without a
       return child;
     }), /could not launch/);
   }
+});
+
+test('Node replay launches standalone node instead of the extension-host executable', async () => {
+  const result = await runNode(['--version'], os.tmpdir(), undefined, 1000, (command, args, options) => {
+    assert.equal(command, 'node');
+    assert.deepEqual(args, ['--version']);
+    assert.equal(options.shell, false);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('v24.19.0\n'));
+      child.emit('close', 0);
+    });
+    return child;
+  });
+  assert.deepEqual(result.command, ['node', '--version']);
+  assert.equal(result.exitCode, 0);
 });
 
 test('real dotnet tests and four before/after inputs run on disposable copy, never original fixture', async (context) => {

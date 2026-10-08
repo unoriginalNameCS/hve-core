@@ -37,12 +37,12 @@ const NODE_REPLACEMENT = `function transfer(accounts, sourceId, destinationId, a
   return { accepted: true, reason: null };
 }`;
 const NODE_HASHES = Object.freeze({
-  'package.json': 'c12148d20ab2e50379c11fa8a5b9753e63fc5ea11492c4debfb7c70e1e227353',
-  'jsconfig.json': '16011b772803f6732d492b5633082f1f67118ff55ea5772ba17d6cdc90d9dbd4',
-  [NODE_TARGET_PATH]: '9b1230ff629dde7a1eb09a323ea17c2c5ef00612071de92744e29eae32ea1574',
-  'src/cases.js': '433343f200998ce42514f5535980a49cfaf07f47ccc9eb77f25e994e91ba4c9a',
-  'src/runner.js': 'b645ca2f0dc750be7dc2894217412e5184d23941d570138321b9a8a3262e1f4c',
-  'tests/transfer.test.js': '1f307325fcbe1b57abfacb531ae7bc87422348ddda0906754631467b42c74ea6'
+  'package.json': '1750280a9b4e0fc75274c10116987ca807d27d54513d69020a58b166aff891a3',
+  'jsconfig.json': '1a5e750d147b15318174099bf1bd28d7f0a9bea4cc1ccae7f52d60af1d1be683',
+  [NODE_TARGET_PATH]: 'fb116b3865c5af50e5ae9b1d8c9023e8eb1ef5de8cdec5841c3caed9fb7b3023',
+  'src/cases.js': '5e7056196a56e7ef742fbe26daaf1e17ff76a179b3de9e6728dd548fca5b56bb',
+  'src/runner.js': 'ef67cfcfda6b6be531dee5f333b9d17e0470aa389691c10437d7afa0f3d5ce43',
+  'tests/transfer.test.js': '6b43df87699a30b5ab8530f27ed8693a6cb0ed98727bd0a77a98391a1c36f624'
 });
 const NODE_CASES = Object.freeze([
   { input: 'successful transfer', result: { accepted: true, reason: null }, balances: { alice: 75, bob: 75 } },

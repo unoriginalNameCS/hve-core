@@ -195,7 +195,7 @@ async function verifyPizzaProposal(candidate, token) {
 }
 
 function runNode(args, cwd, token, timeoutMs = 30000, spawnProcess = spawn) {
-  return runDotnet(args, cwd, token, timeoutMs, spawnProcess, process.execPath);
+  return runDotnet(args, cwd, token, timeoutMs, spawnProcess, 'node');
 }
 
 async function verifyNodeProposal(candidate, token) {

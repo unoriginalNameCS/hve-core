@@ -5,14 +5,14 @@ description: Current implementation, local usage, validation commands, and remai
 
 ## Status
 
-The offline automation slice supports the .NET 10 pizza and Node.js 24.19 banking fixtures. The manually invoked agent and extension commands generate source-grounded Markdown proposals, then review and apply an exact stored proposal after controlled before/after verification. Full PoC acceptance is pending a real VS Code extension-host smoke test of both slices. No live Foundry call has been verified.
+The offline automation slice supports the .NET 10 pizza and Node.js 24.19 banking fixtures. The manually invoked agent and extension commands generate source-grounded Markdown proposals, then review and apply an exact stored proposal after controlled before/after verification. Both native development-host workflows passed against disposable copies. PowerShell-owned repository validation remains pending; no live Foundry call has been verified.
 
 The extension currently provides project-root-bounded discovery and focused source-evidence reads. For C# analysis, it asks for confirmation before invoking language providers or MSBuild. Declining uses syntax-only Roslyn parsing over source text already read inside the selected root. The separate Roslyn worker also has an MSBuild analysis path with static checks for explicit imports and out-of-root project, source, or task-assembly paths.
 
 The report pipeline re-runs bounded discovery, reads focused source/test/documentation evidence, validates citations and target-span replacements, and writes only a Markdown report. The future live adapter has been tested with fake transport only; no live configuration or request has been verified.
 
 The bundled chat agent has four owned tools: bounded discovery, evidence reads, report generation and ID-only apply. Generation defaults to mock and requires report-write confirmation. Application independently requires exact-diff confirmation and runs only the fingerprinted fixtures on disposable copies.
-The controlled pizza Roslyn path and Node provider contracts are tested, but real chat UI and installed TypeScript-provider readiness remain unverified. Do not use MSBuild analysis with arbitrary projects.
+Native JavaScript discovery and Roslyn-backed pizza reporting succeeded. C# reporting can use Roslyn's full declaration span when the editor provider is unavailable. These checks do not certify every provider/version or a complete dynamic call graph. Do not use MSBuild analysis with arbitrary projects.
 
 ## Requirements
 
@@ -149,15 +149,15 @@ The adapter uses native `fetch`, `api-key` authentication, and strict JSON Schem
 
 The endpoint/request contract follows Microsoft's [v1 API lifecycle](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle) and [structured outputs REST documentation](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs). Live resource compatibility and permission to share source require separate verification; no live request was made during implementation.
 
-## Manual Acceptance Remaining
+## Native Validation And Limits
 
-With separate permission, run both launch configurations against pristine disposable fixture copies. Check the agent picker, project readiness, symbols/references/call hierarchy, report-write consent, report opening and exact diff, apply cancellation with unchanged source, successful exact apply, and separate verification report opening. Record the installed TypeScript service version and unavailable/dynamic-reference limitations. Automated VS Code doubles do not certify native host interaction.
+Both native workflows generated mocked reports, presented exact approval, verified disposable before/after behavior and applied only approved source spans. Pizza passed four tests and four representative cases before/after; banking passed eight tests and nine process cases before/after. Node native cancellation left all fixture files unchanged. A separate pizza cancellation demonstration was skipped; shared cancellation also has automated coverage.
 
-Live resource/model compatibility remains a separate optional authorization and source-sharing check. Do not infer permission from mock tests or launch instructions. No host, server, browser, model setup, provisioning or live credential access was performed for the offline implementation.
+Repeated demonstrations require pristine disposable copies and separate host-launch permission. Installed TypeScript service version, comprehensive provider compatibility and live resource/model compatibility are not certified. PowerShell-owned repository checks remain pending. Native smoke does not authorize live calls, server/browser/model setup, provisioning or credential access.
 
 ## Safety Boundaries
 
-* Use only the controlled pizza fixture when exercising MSBuild loading. The VS Code development-host interaction still needs a manual smoke test.
+* Use only the controlled pizza fixture when exercising MSBuild loading. Native smoke coverage is limited to the two known controlled baselines.
 * MSBuild design-time targets may invoke project-defined tasks. The separate BuildHost process is not a sandbox. Confirm before C# provider or MSBuild analysis.
 * If confirmation is declined or root preflight rejects a project, report syntax-only results and text matches as lower-fidelity evidence; do not describe them as semantic references.
 * Do not run arbitrary project tests or scripts as a behavior-capture harness. Only the pinned pizza and Node harnesses and their exact known replacements are supported.
@@ -234,7 +234,7 @@ Before applying a change, the extension-owned confirmation shows the exact file 
 
 A cancelled, stale, or source-mismatched proposal must not change files. Edits beyond the approved diff require a revised proposal and fresh approval.
 
-The .NET stage compares four baseline inputs and four tests. The Node stage compares eight tests, eight independently reset transfer inputs and a fixed CLI error case before/after. A difference stops application and requires a revised proposal, never an unapproved repair. Final acceptance still requires manual development-host smoke testing of both slices.
+The .NET stage compares four baseline inputs and four tests. The Node stage compares eight tests, eight independently reset transfer inputs and a fixed CLI error case before/after. A difference stops application and requires a revised proposal, never an unapproved repair. Both slices passed native development-host smoke; repository mechanical validation and optional live compatibility remain separate.
 
 Live Foundry use remains optional and gated. It requires endpoint and model configuration, endpoint-appropriate authentication, and permission to send the selected source context. Local tests should use a test double; credentials and customer source must not be stored in tracked files.
 

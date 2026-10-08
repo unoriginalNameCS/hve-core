@@ -312,8 +312,11 @@ static string? GetDeclarationKind(SyntaxNode node, string targetSymbol) => node 
 
 static SyntaxLocation ToNodeLocation(SyntaxNode node, string kind)
 {
-    var line = node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-    return new SyntaxLocation(node.SyntaxTree.FilePath, line, kind);
+    var span = node.GetLocation().GetLineSpan();
+    var range = new SyntaxRange(
+        new SyntaxPosition(span.StartLinePosition.Line, span.StartLinePosition.Character),
+        new SyntaxPosition(span.EndLinePosition.Line, span.EndLinePosition.Character));
+    return new SyntaxLocation(node.SyntaxTree.FilePath, span.StartLinePosition.Line + 1, kind, range);
 }
 
 internal sealed record AnalysisRequest(
@@ -330,7 +333,9 @@ internal sealed record SyntaxAnalysis(
     SyntaxLocation[] TargetCandidates,
     SyntaxLocation[] SyntacticMatches,
     SyntaxDiagnostic[] Diagnostics);
-internal sealed record SyntaxLocation(string Path, int Line, string Kind);
+internal sealed record SyntaxPosition(int Line, int Character);
+internal sealed record SyntaxRange(SyntaxPosition Start, SyntaxPosition End);
+internal sealed record SyntaxLocation(string Path, int Line, string Kind, SyntaxRange? SourceRange = null);
 internal sealed record SyntaxDiagnostic(string Path, int Line, string Message);
 internal sealed record MsBuildAnalysis(
     string Mode,

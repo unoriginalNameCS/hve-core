@@ -11,18 +11,18 @@
 
 ## Execution Status
 
-* Status: Partial
+* Status: Complete for implementation and native smoke; repository mechanical acceptance remains deferred.
 * Declared invocation scope: full plan
-* Completed scope markers: P01, P01-T01, P01-T02, P02, P02-T01, P02-T02, P02-T03, P03, P03-T01, P03-T02, P04-T01
-* All remaining active-plan markers: P04, P04-T02
-* Latest bounded invocation: P04-T01 and feasible P04-T02 handoff work within parent full-plan scope. Real extension-host smoke explicitly excluded; no subagents or git operations were used.
+* Completed scope markers: P01, P01-T01, P01-T02, P02, P02-T01, P02-T02, P02-T03, P03, P03-T01, P03-T02, P04, P04-T01, P04-T02
+* All remaining active-plan markers: none.
+* Latest invocation: User-authorized P04-T02 native smoke and directly blocking repairs. No git operations or live Foundry calls were performed.
 * Current validation: focused generation/registration/runner checks, real disposable pizza and Node test/replay, full demo syntax/tests, dependency-free Node tests and root Markdown lint. Frontmatter/public-feed owners cannot start without `pwsh`.
 * P03 interpretation: read-only preview was implementation staging, not a user restriction. With the gate implemented, the manual agent now exposes only the two read-only tools, owned report generation and ID-only apply. Commands and tools share one memory-only store and independent extension modals.
-* Status basis: P01-P03 and the Node automation slice are implemented and validated. README and standalone launch recipes are ready. Full-plan acceptance remains Partial because real host interaction and installed TypeScript-provider readiness are unverified. No live Foundry request or credential access is claimed.
+* Status basis: Both native fixture workflows generated reports, presented exact approval, verified disposable before/after behavior and applied only approved spans. Node native cancellation passed; the user skipped a separate pizza cancellation attempt, which is not claimed as performed. Mechanical acceptance is deferred because `pwsh`-owned checks remain unavailable. No live compatibility or complete provider coverage is claimed.
 
 ## Execution Summary
 
-P01-P03 and P04-T01 are complete. The manual agent and commands share bounded source-grounded generation, immutable candidates, exact-diff approval and controlled verification. The default mock never reads environment values or calls transport. Pizza replay compares four existing tests and outputs `2.50`, `0.00`, `5.00`, `7.50`; Node compares eight reset-state tests, eight transfer subprocesses and one CLI error case before/after. Generation still reports tests and runs as `not run`; observed verification is a separate Markdown report. Original fixtures remain unchanged by tests. P04-T02 handoff automation is ready, but real host smoke remains unperformed.
+P01-P04 implementation and native smoke are complete. The manual agent and commands share bounded source-grounded generation, immutable candidates, exact-diff approval and controlled verification. The default mock never reads environment values or calls transport. Pizza replay compares four existing tests and outputs `2.50`, `0.00`, `5.00`, `7.50`; Node compares eight reset-state tests, eight transfer subprocesses and one CLI error case before/after. Generation still reports tests/runs as `not run`; owned verification is a separate report. Native changes were confirmed only in disposable copies; repository fixtures remain unchanged.
 
 ## Completed Work
 
@@ -265,20 +265,20 @@ P01-P03 and P04-T01 are complete. The manual agent and commands share bounded so
 
 ## Pre-Review Reconciliation
 
-* Plan markers/task context: P01-P03 and P04-T01 complete; P04/P04-T02 remain unchecked pending real host smoke.
+* Plan markers/task context: P01-P04 and every task are complete for implementation/native smoke. Mechanical acceptance remains deferred.
 * Completed-work/handoff prose: current through P04 automation, including Node and generation-tool exports, exact approval sequence and packaging exemption.
-* Validation/blockers: extension 70/70, Node 8/8, syntax and Markdown lint pass. Frontmatter/public-feed owners unavailable without `pwsh`; real host/provider smoke and optional live compatibility remain unverified.
-* Review readiness: automation slice is ready for parent review; full-plan acceptance is not ready because required native host smoke has not run. Instruction-quality self-review is not human acceptance.
+* Validation/blockers: Final extension suite 73/73 and both native fixture workflows pass. Markdown lint has zero issues. Frontmatter/public-feed owners remain unavailable without `pwsh`; broader provider/live compatibility is not certified.
+* Review readiness: Automation and native evidence are available; unavailable PowerShell-owned checks still prevent unrestricted repository acceptance. Instruction-quality self-review and observed user clicks are not human review-checkbox completion.
 
 ## Blockers
 
-* P04-T02 real VS Code development-host modal/agent/provider interaction requires separate permission and disposable copies; none was launched. Installed TypeScript provider version/readiness remains unverified.
+* No native workflow blocker remains. JavaScript discovery and Roslyn-backed C# reporting worked in the desktop host; installed TypeScript service version and comprehensive editor-provider compatibility are not certified.
 * Root frontmatter/public-feed validation requires unavailable `pwsh`. Record the unavailable gate; do not install tools implicitly.
 * Live Foundry compatibility separately requires supported endpoint/model configuration and exact source-sharing consent; optional live verification is not part of current offline acceptance.
 
 ## Remaining Work
 
-* Only P04/P04-T02 remain active: separately authorized native smoke of discovery, report/read/review, cancel/apply and observed verification for both fixture copies. Automated checks are complete; no Node runtime mismatch exists. Do not invoke live Foundry or set up services/credentials implicitly.
+* No active implementation marker remains. PowerShell-owned mechanical checks need separately authorized tooling resolution. Optional live resource/model verification and a separate pizza cancellation repeat were not performed; neither is silently inferred from these results.
 
 ## Follow-Up Items
 
@@ -287,14 +287,14 @@ P01-P03 and P04-T01 are complete. The manual agent and commands share bounded so
 
 ## Return-to-Caller State
 
-* Implementation execution status: Partial.
-* Declared scope and markers: Parent full plan; P04 automation invocation complete. P01-P03 and P04-T01 complete; P04/P04-T02 remain unchecked.
-* Validation coverage: Final demo syntax and 70/70 extension tests, 8/8 Node fixture tests, and root Markdown lint pass. Real pinned pizza and Node before/after replay passed; native provider interaction is mocked, not certified. Frontmatter/public-feed owners unavailable without `pwsh`.
-* Blockers: Native development-host smoke is a separate, not-yet-authorized interactive action; there is also a tooling gap for `pwsh`. Optional live calls require configuration and source-sharing consent and were not attempted.
+* Implementation execution status: Complete for implementation/native smoke; mechanical acceptance deferred.
+* Declared scope and markers: Parent full plan; P01-P04 and all tasks complete.
+* Validation coverage: Final extension suite 73/73, Node fixture 8/8, worker compile, focused discovery and root Markdown lint pass. Both native controlled workflows and actual exact-span applications were observed and independently checked. Comprehensive provider compatibility is not certified; PowerShell-owned validators remain unavailable.
+* Blockers: `pwsh`-owned mechanical checks remain unavailable. Optional live calls require configuration and source-sharing consent and were not attempted.
 * Current plan updates: Manual agent now uses the exact requested four registered tools, shared candidates and independent approval. Both known controlled replacements supported once per pristine copy; Node runtime matches `24.19.0`. No root packaging commands were run.
-* Planning/critique state: Historical critique-3 remains Pass; no new critique or subagent launched. Next implementation action is separately authorized P04-T02 host smoke after automated gates, not P02/P03 reimplementation.
+* Planning/critique state: Historical critique-3 remains Pass; no new critique required. Native smoke is complete; next acceptance action is the separate mechanical-tooling gap, not reimplementation.
 * Follow-up items: None.
-* Review readiness/no-handoff reason: Automation slice ready for parent inspection; full-plan acceptance remains Partial because real-host smoke is unverified. Human acceptance is not marked complete.
+* Review readiness/no-handoff reason: Automation/native evidence is ready; repository mechanical acceptance remains deferred. Human acceptance is not marked complete.
 * Continuation owner: Active automatic RPI Agent.
 
 ## Parent Final Validation
@@ -304,3 +304,79 @@ P01-P03 and P04-T01 are complete. The manual agent and commands share bounded so
 * `npm.cmd --prefix demos/legacy-code-transformation/fixtures/node test`: 8/8 passed independently of extension replay.
 * Editor diagnostics: no reported errors in the demo or current plan. Root Markdown lint passed in the delegated validation; unavailable PowerShell-owned gates remain explicitly recorded.
 * No commits, pushes, branch changes, live Foundry calls, or interactive host launches were performed. P04-T02 remains unchecked pending the native-host acceptance action.
+
+## Native Host Smoke Started
+
+* Authorization: User selected option 1 (demo smoke test) on 2026-10-08. This permits the native development-host launch and controlled disposable-fixture workflow, not live Foundry calls or tooling installation.
+* Host prerequisite: Installed VS Code `1.140.0` matches the standalone extension engine requirement.
+* Preparation: Copied the six source/config/test files of each current Node and pizza fixture byte-for-byte into disposable folders, excluding generated output. Original repository files were not changed by preparation.
+* Disposable root: `C:/Users/JESHNI~1.KUM/AppData/Local/Temp/lcta-native-smoke-251513aa96b545d7a971933473bb3804`; `node` is the first native workspace, `dotnet` is prepared for the second slice.
+* Launch: `code --new-window --extensionDevelopmentPath=<standalone extension> <disposable node root> --goto <disposable node src/transfer.js>` completed; native process title confirms `[Extension Development Host] transfer.js - node - Visual Studio Code`.
+* Assessment limit: The available browser UI tools cannot operate native VS Code dialogs; the new-window agent picker, provider readiness, report/cancel/apply and verification-report interaction require user-observed evidence. Window launch alone does not establish extension activation or workflow acceptance.
+* Next check: In the new development-host window, confirm `Legacy Code Transformation Demo` appears in the Copilot agent picker. Keep mode mocked. P04-T02 remains unchecked until both native slices are actually observed.
+* User-observed native result: `Legacy Code Transformation Demo` is visible in the development-host agent picker. This confirms discovery of the bundled agent, not report/apply behavior.
+* Current smoke step: Generate a mocked report for the disposable Node `src/transfer.js` symbol `transfer`; source application is not yet requested.
+* Native defect: The user reported that the demo agent could not invoke discovery or report tools because those tools were unavailable in its session. No report, source write, test run, or live call occurred in that failed attempt.
+* P04-T02 repair: Added `canBeReferencedInPrompt: true` and `toolReferenceName` matching the existing allowlist/registered name for all four contributed tools in [demos/legacy-code-transformation/extension/package.json](../../../demos/legacy-code-transformation/extension/package.json). The [VS Code Language Model Tool guide](https://code.visualstudio.com/api/extension-guides/ai/tools) requires these fields for tools used with agents/chat. Registration and approval gates are unchanged.
+* Regression validation: [demos/legacy-code-transformation/extension/tests/manifest.test.js](../../../demos/legacy-code-transformation/extension/tests/manifest.test.js) now checks chat exposure and allowlist-name parity. `npm.cmd --prefix demos/legacy-code-transformation/extension test -- tests/manifest.test.js` passed 8/8. The new test initially assumed LF; it now accepts CRLF without changing the agent file.
+* Next native check: Reload the development-host window, start a fresh chat with the demo agent, and retry the mock report request. Automated metadata checks are not yet native confirmation of the fix; P04-T02 remains open.
+* Native retry result: The user observed a successful discovery-tool invocation after reload, confirming tool exposure is repaired. Discovery then reported the function declaration and CommonJS export property as two `transfer` candidates, so the agent correctly stopped without a report or source edit.
+* Discovery repair: [demos/legacy-code-transformation/extension/src/workspace-discovery.js](../../../demos/legacy-code-transformation/extension/src/workspace-discovery.js) excludes provider `Property` entries from function/class target candidates while retaining exports in reference/text evidence. A focused case in [demos/legacy-code-transformation/extension/tests/workspace-discovery.test.js](../../../demos/legacy-code-transformation/extension/tests/workspace-discovery.test.js) confirms unique function-plus-export resolution and genuine duplicate-declaration ambiguity; passed 1/1.
+* Fixture drift: The first full-suite rerun found two Node integration failures due to stale fixture pins. Every old fingerprint exactly matched the current corresponding file with only final EOF whitespace removed; all six current files have a final newline, with no internal or behavior change. Updated only `NODE_HASHES` in [demos/legacy-code-transformation/extension/src/node-fixture.js](../../../demos/legacy-code-transformation/extension/src/node-fixture.js) to the reviewed current normalized bytes. Fixture source and strict fingerprint checks are unchanged.
+* Current validation: Focused Node replay/application checks passed 2/2 after the pin repair. Full extension suite now passes 72/72, zero failed/cancelled/skipped, captured in `logs/lcta-native-smoke-tests.log`. Editor diagnostics for repaired source and tests are clear.
+* Next native step: Reload the development host and generate the Node mock report. Report opening, native cancellation/application and the pizza host slice remain unverified; P04-T02 is still open.
+* User-observed Node result: After the discovery repair and reload, a report opened containing the exact known `transfer` guard-clause replacement, collected evidence and explicit simulation/unverified behavior labels.
+* On-disk evidence: Native report `node/reports/legacy-code-transformation/0c927f5a-4d84-4c16-bd35-99f1b5d02656.md` exists under the disposable root. A direct byte comparison confirms disposable `src/transfer.js` still equals the repository original after generation.
+* Current smoke step: Review the stored Node candidate via the native command and cancel its exact-diff confirmation. Actual source application has not been requested or observed yet.
+* Native cancellation passed: The user observed the exact-diff dialog with `Apply exact proposal` and `Cancel`, then clicked `Cancel`. A byte-for-byte comparison after cancellation confirms all six disposable Node fixture files still equal their repository originals. Only the original proposal report exists; no verification report was generated.
+* Next native step: Reopen the same pending Node candidate and explicitly confirm its exact proposal on the disposable copy. Successful application and verification-report opening, plus the pizza native slice, remain unverified. P04-T02 remains open.
+* Native apply attempt: User reported another VS Code window rather than an error. On-disk inspection found verification report `node/reports/legacy-code-transformation/da53f9b4-e3e6-4d40-bdfb-1a982d0421a4.md` with `Verification: failed`; all fixture files and selected source remained unchanged.
+* Observed cause: The report's setup command was `Code.exe --version`, with no Node version output. Inside an Electron extension host, `process.execPath` points to VS Code, not the standalone Node CLI. The version gate blocked application before any baseline or transformed execution.
+* Runtime repair: [demos/legacy-code-transformation/extension/src/fixture-replay.js](../../../demos/legacy-code-transformation/extension/src/fixture-replay.js) now uses the standalone `node` executable from PATH for Node verification. Native spawn, restricted environment, version gating, cancellation and exact-source approval remain unchanged. No fixture source or caller-selected executable configuration was added.
+* Regression evidence: [demos/legacy-code-transformation/extension/tests/proposal-apply.test.js](../../../demos/legacy-code-transformation/extension/tests/proposal-apply.test.js) now asserts standalone executable selection; focused regression passed 1/1. The complete extension suite passed 73/73, zero failed/cancelled/skipped, in `logs/lcta-native-runtime-tests.log`. Editor diagnostics for source/tests are clear.
+* Current native next step: Reload the development host, generate a fresh mock Node proposal, review its exact diff and explicitly apply on the disposable copy. The failed candidate cannot be reused. Native successful application/report opening and the pizza slice remain pending; no live call or repository fixture write occurred.
+* Native Node application passed: User observed `Verification: passed` for proposal `00e2ac0f-f54c-4668-8dce-e5db9864f630`. The corresponding on-disk report is `node/reports/legacy-code-transformation/a7677eb4-f2b1-47b1-9412-76791fe7acdf.md`; structured observations record nine baseline and nine transformed cases with passed verification.
+* Actual application confirmed independently: Disposable `src/transfer.js` now equals the original file with only the exact known approved function-span replacement. All five other fixture files remain byte-identical to repository originals. The reviewed report's pre-application disclaimer is correct; source comparison, not the report alone, establishes actual application.
+* Node native coverage: Agent picker/tool availability, installed JavaScript-provider discovery, mock report opening, exact-diff confirmation, cancel without writes, successful controlled verification/application and verification report opening have been observed. No live Foundry calls occurred.
+* Remaining native scope: The prepared disposable pizza copy under the same smoke root still needs C# discovery/report and cancel/apply interaction. P04-T02 remains open; PowerShell-owned mechanical checks remain separately unavailable.
+* Native pizza report gap: User opened a no-change simulation report with only the method declaration line. On-disk report `dotnet/reports/legacy-code-transformation/d901fbd4-98a7-45ca-bf65-18115f3a1378.md` confirms `msbuild-workspace`, unique Roslyn resolution and no worker diagnostics; the C# editor provider returned no unique symbol. The user allowed C# analysis, so bounded-text selection was not the cause.
+* Root cause and repair: The Roslyn worker previously returned declaration locations without full spans, while discovery populated complete source only from the editor provider. [demos/legacy-code-transformation/extension/roslyn-worker/Program.cs](../../../demos/legacy-code-transformation/extension/roslyn-worker/Program.cs) now returns exact declaration line/character ranges; [demos/legacy-code-transformation/extension/src/workspace-discovery.js](../../../demos/legacy-code-transformation/extension/src/workspace-discovery.js) preserves root-verified spans and reads the selected target body from already collected source even when editor symbols are absent. The consent/root-preflight gates are unchanged; declining still yields unresolved/no-change reporting.
+* Validation: Worker compile check completed. Focused real controlled-pizza discovery passed 1/1 and now proves the full declaration/body reaches the mock and produces the one expected replacement without editor symbols. The complete [demos/legacy-code-transformation/extension/tests/workspace-discovery.test.js](../../../demos/legacy-code-transformation/extension/tests/workspace-discovery.test.js) slice passed 9/9, including root filtering, external-reference rejection, consent fallback and genuine symbol ambiguity. Source/test diagnostics are clear.
+* Current native step: Reload the pizza development host, select the saved calculator file and generate a new mocked report for `CalculateDiscountAmount`, allowing C# provider analysis for this controlled fixture. Native replacement report/cancel/apply and actual .NET verification remain pending; P04-T02 is not marked complete.
+* Native pizza proposal passed: User selected the exact method `CalculateDiscountAmount` and observed the mocked simplification report. On-disk report `dotnet/reports/legacy-code-transformation/78cdac90-767d-4a7c-85c0-f1cd9b30ebd3.md` contains one change with the expected discount expression. Byte comparison confirms disposable calculator source remains identical to the repository original after generation.
+* Unsupported/typo intake: Earlier reports targeting the class `PizzaDiscountCalculator` or misspelled `CalculatorDiscountAmount` proposed no edits; selecting the supported method resolved those attempts without changing source or extending mock support.
+* Next native check: Open the stored pizza candidate with the review/apply command and cancel its exact-diff dialog. Successful native cancellation and application/verification are still pending; P04-T02 remains open.
+
+## P04-T02 Native Smoke Completion
+
+* Completed work: Both native development-host workflows generated known mocked proposals and successfully applied the exact approved spans after owned disposable verification. Native Node cancellation passed. User reported clicking apply instead of cancelling for pizza; a separate native pizza cancellation is explicitly not claimed.
+* Pizza evidence: Proposal `0cecad5f-ffbd-45d7-9aac-13c27c44a668`, report `dotnet/reports/legacy-code-transformation/fd507756-75b1-4630-bb1b-e99c79e9e5ef.md`, passed verification, 4/4 tests and four matching cases before/after. Independent source comparison confirms only the exact approved method replacement; the other five fixture files are unchanged.
+* Repository source: Bundled fixture originals remain unchanged. The smoke operates on the recorded temporary copies; generated reports remain outside the repository.
+* Final regression: `npm.cmd --prefix demos/legacy-code-transformation/extension test` passed 73/73 after all native repairs, with zero failed/cancelled/skipped; capture `logs/lcta-smoke-final-tests.log`. Worker compile and focused discovery tests passed. Root `npm.cmd run lint:md` ran through the installed executable; `logs/markdownlint-results.json` is `[]`, confirming zero issues after status documentation updates.
+* Outcome: P04-T02's required native discovery/report/approval/application/replay sequence has evidence for both .NET and Node. Shared cancellation is covered by native Node plus automated apply tests; separate pizza cancellation was skipped. No universal equivalence, complete provider compatibility, live Foundry compatibility or human review-checkbox acceptance is claimed.
+* Remaining gate: PowerShell-owned frontmatter/feed checks remain unavailable without `pwsh`; tooling installation was not authorized by smoke selection.
+
+## Resume Tomorrow
+
+* Read this changes record first, then the linked plan and current review. Implementation/native smoke is complete; do not restart P01-P04 or repeat fixed discovery/runner work.
+* First remaining acceptance action: Check for an existing PowerShell 7 (`pwsh`) installation, then run the owning local-safe `lint:frontmatter` and `lint:public-dependency-feeds` package checks if available. Tool installation requires separate authorization; do not substitute Windows PowerShell 5.1 or infer permission for CI lanes.
+* Confirmed evidence: Final extension suite 73/73, Markdown zero issues, native banking and pizza exact applications/replay passed, repository fixture originals unchanged. Native Node cancellation passed; a separate pizza cancellation demonstration was skipped and is not claimed.
+* Keep proposal responses mocked. Future live configuration uses extension-host `api_key`, `model`, and `endpoint`; no live calls or credential access are authorized merely by resuming.
+* For another demo, create pristine copies from the repository fixtures. The existing temporary copies are already transformed; proposal candidates are memory-only and disappear on host restart. Do not reuse old proposal IDs or reset the original repository fixtures.
+* Backup state at handoff: Local branch `poc-demo` tracks `azure/targeted-legacy-transformation-agent`. Latest source, README, plan and changes-log edits are saved but uncommitted/unpushed. Review and back up the intended changes on that feature branch; do not push to `main` or force-push. New ignored tracking artifacts need explicit force-add if they are to be included.
+* Optional next improvement, outside the completed plan: Replace free-text target entry with a bounded symbol picker or supported-mock target hints. This is grounded in the class-name and spelling retries during native smoke; implement only after the user selects that scope.
+
+## Standup Demo Guide
+
+* User requested a separate step-by-step Markdown guide for the 2026-10-09 standup. Created [.copilot-tracking/demos/legacy-code-transformation-standup-guide.md](../../demos/legacy-code-transformation-standup-guide.md).
+* Contents: Fresh byte-verified fixture preparation, tool prerequisites, banking short route and optional pizza route, exact symbols and native dialog choices, chat/command generation, cancellation and approval, verification plus actual source application, talking points, timing, troubleshooting, reset and feature-branch backup notes.
+* Validation: All ten PowerShell blocks parsed without errors; all three local references resolve; editor diagnostics are clear. Commands were not executed as a new rehearsal, and no development host, service, live model request or Git mutation was launched by guide authoring.
+* Backup note: The new guide is ignored by default and needs explicit force-add if the user wants it included in the remote feature-branch backup. Do not infer a commit or push request from guide creation.
+
+## Implementation Walkthrough
+
+* User requested a companion explanation of everything implemented today, how the system works and what is next. Created [.copilot-tracking/demos/legacy-code-transformation-implementation-walkthrough.md](../../demos/legacy-code-transformation-implementation-walkthrough.md) beside the standup guide; the user-edited standup guide was not modified.
+* Contents: Earlier foundation versus today's additions, architecture diagram, chat/command entry points, root-bounded discovery, evidence/source snapshots, mock/live adapter, structured validation, report writing, candidate/hash state, independent approval, controlled before/after replay, actual source writes, native smoke fixes, verified results, source-file map, limits and prioritized next work.
+* Evidence: Reviewed current entry points, generation coordinator, contract, adapter, candidate/apply and replay code before explaining. Kept mock-only behavior, fixed-fixture restrictions, skipped pizza cancellation and unavailable mechanical checks explicit.
+* Validation: All 43 local source/artifact links resolve; code fences and tracking header are structurally valid; editor diagnostics are clear. Mermaid structure was reviewed but not visually rendered. No source edits, demos, live calls, services, tooling installs, commits or pushes were performed by walkthrough authoring.
+* Continuation: Read this walkthrough for implementation context and the standup guide for presentation steps. Existing Resume Tomorrow remains authoritative for next acceptance actions. The new ignored Markdown needs intentional force-add if included in a remote backup.

@@ -13,10 +13,10 @@
 
 The plan will build a contained VS Code proof of concept that analyzes a selected legacy function or class, produces a source-grounded proposal, waits for approval of the exact change, and then compares tests and representative runs before and after. The first slice is the .NET 10 pizza eligibility sample; Node.js 24.19 banking transfer follows. Java remains deferred.
 
-* Bottom line: P01-P03 and P04-T01 automation are complete. Only P04-T02 native development-host smoke remains; it requires separate permission. The full plan remains Partial.
+* Bottom line: P01-P04 implementation and user-authorized native smoke are complete. Repository mechanical acceptance remains deferred because PowerShell-owned checks cannot run without `pwsh`.
 * Why this matters: an inheriting developer needs evidence-backed context and a behavior-checked proposal before modifying difficult code.
-* Planning result: Both fixtures use owned evidence, exact-target validation, mock-default reports, immutable memory-only candidates, mandatory exact-diff approval and real disposable verification before source writes. The manual agent exposes the requested registered discovery/evidence, generation and ID-only apply tools. P04/P04-T02 remain unchecked until host smoke.
-* Confidence and uncertainty: extension syntax and 70/70 tests, Node fixture 8/8 tests and root Markdown lint pass. Installed Node `v24.19.0` matches the planned runtime. Frontmatter/public-feed validation cannot start without `pwsh`; real host/provider readiness and optional live resource compatibility remain unverified. No host launch, live call or credential access is authorized here.
+* Planning result: Both fixtures use owned evidence, exact-target validation, mock-default reports, immutable memory-only candidates, mandatory exact-diff approval and real disposable verification before source writes. Both native workflows passed; Node cancellation passed and a separate pizza cancellation attempt was skipped, not claimed as performed.
+* Confidence and uncertainty: 73/73 extension tests, worker compile and both native apply/replay paths pass. Installed Node `v24.19.0` matches the target. Frontmatter/public-feed checks remain unavailable; complete editor-provider compatibility, installed TypeScript service version and optional live resource compatibility are not certified. No live call or credential access was authorized.
 
 ### What You May Not Know
 
@@ -436,7 +436,7 @@ Dependencies:
 * P01-T02, P03-T01.
 
 <!-- rpi:phase id=P04 -->
-### [ ] P04: Add the Node.js transfer slice
+### [x] P04: Add the Node.js transfer slice
 
 Goals:
 * Demonstrate the same bounded discovery, proposal, approval, and replay workflow for the Node.js 24.19 banking transfer fixture after the .NET slice is stable.
@@ -501,7 +501,7 @@ Dependencies:
 * P03.
 
 <!-- rpi:task id=P04-T02 -->
-#### [ ] P04-T02: Complete the integrated PoC handoff
+#### [x] P04-T02: Complete the integrated PoC handoff
 
 Goals:
 * Make the two-slice PoC repeatable for a reviewer and document its supported boundaries, setup, report path, and prerequisites.
@@ -516,7 +516,7 @@ Requirements:
 Details:
 * Perform an end-to-end manual smoke in the VS Code extension development host: discovery report, explicit approval, exact edit application, and before/after test/replay for .NET and Node.
 * Do not add the demo runtime to HVE Core plugin membership or VSIX packaging unless separately planned and approved.
-* README and standalone launch recipes are implemented and automated gates passed. Stop before real host interaction in the current invocation; leave this task and P04 unchecked until separately authorized native smoke. No new servers/browser/model/service setup, provisioning, credentials reading or live Foundry calls are authorized.
+* README and standalone launch recipes are implemented. User authorized native host smoke on 2026-10-08; both controlled workflows completed report, explicit exact approval, application and before/after verification. Native Node cancellation passed; separate pizza cancellation was skipped. No new servers/browser/model/service setup, provisioning, credentials reading or live Foundry calls were authorized.
 * Verify both fixtures on pristine disposable copies. Approved replacement works once per baseline fingerprint; use a new copy for another demonstration, not rollback or a generic transformation. Frontmatter/public-feed owners remain unavailable without `pwsh`; do not install tools implicitly.
 
 Guidance:
@@ -556,16 +556,16 @@ Dependencies:
 
 | Field | Record |
 | --- | --- |
-| Planning execution and readiness | Complete planning; implementation Partial. P01-P03 and P04-T01 automation complete; only P04-T02 native smoke remains after separate permission. |
+| Planning execution and readiness | Complete planning and implementation/native smoke; mechanical acceptance deferred for unavailable PowerShell-owned validators. |
 | Decision participation | Agent-owned; automatic RPI Agent context. |
-| Blockers | Real extension-host smoke is explicitly not authorized here; native TypeScript readiness/version remains unverified. Frontmatter/public-feed owners require unavailable `pwsh`. Live compatibility is a separate optional source-sharing/configuration prerequisite. |
+| Blockers | Frontmatter/public-feed owners require unavailable `pwsh`. Installed TypeScript service version and broad provider compatibility are not certified. Live compatibility remains a separate optional source-sharing/configuration prerequisite. |
 | Latest critique | [.copilot-tracking/reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md](../../reviews/plans/2026-10-07/legacy-code-transformation-agent-plan-critique-3.md), Pass. |
 | Relevant research | [.copilot-tracking/research/2026-10-07/legacy-code-transformation-agent-research.md](../../research/2026-10-07/legacy-code-transformation-agent-research.md) |
 | Plan | `.copilot-tracking/plans/2026-10-07/legacy-code-transformation-agent-plan.md` |
-| Changes-record role | [.copilot-tracking/changes/2026-10-07/legacy-code-transformation-agent-changes.md](../../changes/2026-10-07/legacy-code-transformation-agent-changes.md) records P01-P04 automation, current exports, 70/70 extension tests, 8/8 Node tests, Markdown pass and manual/tooling gaps; full plan remains Partial. |
+| Changes-record role | [.copilot-tracking/changes/2026-10-07/legacy-code-transformation-agent-changes.md](../../changes/2026-10-07/legacy-code-transformation-agent-changes.md) records P01-P04 completion, native repairs, 73/73 tests, actual disposable application comparisons and remaining tooling/live limits. |
 | Continuation owner | Active automatic RPI Agent. |
-| Required gates or confirmations | Automated root confinement, report/source binding, independent exact approval and real .NET/Node replay pass. Native agent/dialog/TypeScript smoke remains; exact-context source sharing and supported live resource configuration remain separate. |
-| Next action | After automation review, obtain separate permission for P04-T02 native development-host smoke of both disposable fixture copies. Do not launch hosts or live calls implicitly. Node runtime matches `v24.19.0`; no runtime installation gap exists. |
+| Required gates or confirmations | Root confinement, report/source binding, independent exact approval and real .NET/Node replay pass with native evidence. PowerShell-owned validators remain unavailable; exact-context source sharing and live configuration remain separate. |
+| Next action | Resolve PowerShell-owned mechanical validation as a separately authorized tooling action. No active implementation marker remains; do not infer permission for live calls. |
 
 ## Goals
 
@@ -667,7 +667,7 @@ Dependencies:
 * [x] Critique setting, status, findings, dispositions, readiness, continuation owner, gates, and next action are current.
 * [x] Follow-Up Items remain outside active plan completion.
 * Checked sections: task metadata, executive summary, phase/task blocks and diagrams, decisions, readiness, requirements, risks, critique dispositions, sources, and handoff.
-* Missing or limited sections: diagrams were not rendered in light/dark themes; P01-P04 automation is validated but real host UI/installed TypeScript provider interaction and optional live invocation remain unverified. `pwsh`-owned frontmatter/public-feed checks are unavailable; human acceptance remains outstanding.
+* Missing or limited sections: diagrams were not rendered in light/dark themes. Both native controlled workflows passed; installed TypeScript service version, comprehensive provider compatibility and optional live invocation are not certified. `pwsh`-owned frontmatter/public-feed checks are unavailable; human review acceptance is not inferred.
 
 ## Follow-Up Items
 
