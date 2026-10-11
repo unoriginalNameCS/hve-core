@@ -204,7 +204,14 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
   const catalog = new Map((evidenceCatalog ?? []).map((item) => [item.id, item]));
   const lines = [
     '# Legacy Code Refactor Proposal',
-    '',
+    ''
+  ];
+
+  if (collectedContext?.changeRequest) {
+    lines.push('## Requested Refactor', '', escapeText(collectedContext.changeRequest), '');
+  }
+
+  lines.push(
     '## Model Proposal (Unverified)',
     '',
     escapeText(proposal.summary),
@@ -216,7 +223,7 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
     '',
     '## Evidence',
     ''
-  ];
+  );
 
   for (const citation of proposal.evidence) {
     const source = catalog.get(citation.id);
@@ -229,6 +236,16 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
   for (const [index, change] of proposal.changes.entries()) {
     lines.push(`### Change ${index + 1}: ${codeSpan(change.path)}`, '');
     lines.push(`Rationale: ${escapeText(change.rationale)}`, '', 'Original:', '', textFence(change.originalText), '', 'Replacement:', '', textFence(change.replacementText), '');
+  }
+
+  if (collectedContext?.sampleInputs?.length) {
+    lines.push('## Supplemental Sample Inputs', '',
+      'The live model suggested these bounded inputs. Expected results are calculated by the extension from the selected fixture rules; the model did not provide expected outputs. These cases have not run yet.', '');
+    for (const [index, sample] of collectedContext.sampleInputs.entries()) {
+      lines.push(`### Sample ${index + 1}`, '',
+        `Input: ${textFence(JSON.stringify(sample, null, 2))}`, '',
+        `Expected by fixture rules: ${textFence(JSON.stringify(collectedContext.expectedSampleCase(expectedTarget, sample), null, 2))}`, '');
+    }
   }
 
   lines.push('## Unknowns', '');

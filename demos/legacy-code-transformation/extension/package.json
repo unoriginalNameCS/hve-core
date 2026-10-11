@@ -50,17 +50,18 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_code_transformation_demo_generate_proposal_report",
         "displayName": "Generate a source-grounded proposal report",
-        "modelDescription": "Recollect bounded saved source and evidence through owned routines, validate one exact target proposal and write a unique Markdown report after extension-owned report confirmation. Default mock never reads environment or calls transport. Live mode requires explicit user request and separate exact-context sharing consent. Returns candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply. No tests or source writes during generation.",
+        "modelDescription": "Recollect bounded saved source and evidence through owned routines, apply the requested refactor to one selected target, validate the exact proposal, and write a unique Markdown report after extension-owned confirmation. Live mode accepts a bounded changeRequest, defaulting to readability and maintainability while preserving behavior, and requires separate consent showing the exact request and source context. Default mock remains an offline fixed demonstration. Returns the change request, candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply. No tests or source writes during generation.",
         "userDescription": "Confirm report creation, review the generated report, then separately approve application if wanted.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["projectRoot", "targetFile", "targetSymbol"],
+            "required": ["projectRoot", "targetFile", "targetSymbol"],
           "properties": {
             "projectRoot": { "type": "string", "description": "Absolute path exactly matching an opened project workspace folder." },
             "targetFile": { "type": "string", "description": "Absolute saved source file path inside projectRoot." },
             "targetSymbol": { "type": "string", "description": "Exact selected function, method or class name." },
-            "mode": { "type": "string", "enum": ["mock", "live"], "default": "mock", "description": "Use mock unless the user explicitly requests live." }
+            "mode": { "type": "string", "enum": ["mock", "live"], "default": "mock", "description": "Use mock unless the user explicitly requests live." },
+            "changeRequest": { "type": "string", "maxLength": 1000, "description": "Optional desired refactor, passed only in Live mode. Defaults to improving readability and maintainability while preserving behavior." }
           }
         },
         "tags": ["proposalBound"]

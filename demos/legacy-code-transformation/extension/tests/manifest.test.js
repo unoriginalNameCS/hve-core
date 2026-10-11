@@ -18,6 +18,7 @@ test('custom agent contribution resolves to the manually invoked approval-gated 
 
   assert.ok(relativePath && !relativePath.startsWith('..'));
   assert.ok(agentPath.endsWith('.agent.md'));
+    assert.match(agentContent, /^name: Targeted Legacy Code Transformation Agent$/m);
   assert.match(agentContent, /^user-invocable: true$/m);
   assert.match(agentContent, /^disable-model-invocation: true$/m);
   assert.match(agentContent, /^tools:\r?\n\s+- legacy_code_transformation_demo_discover_target\r?\n\s+- legacy_code_transformation_demo_read_source_evidence\r?\n\s+- legacy_code_transformation_demo_generate_proposal_report\r?\n\s+- legacy_code_transformation_demo_apply_proposal\r?\n---/m);
@@ -120,7 +121,7 @@ test('generation registration shares the candidate store and rejects missing mod
   assert.equal(registrations[0].tool.store, store);
   const tool = manifest.contributes.languageModelTools.find((item) => item.name === GENERATE_REPORT_TOOL);
   assert.equal(tool.inputSchema.additionalProperties, false);
-  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['projectRoot', 'targetFile', 'targetSymbol', 'mode']);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['projectRoot', 'targetFile', 'targetSymbol', 'mode', 'changeRequest']);
 });
 
 test('standalone launch configurations prompt for fixture copies and contain no credentials', () => {

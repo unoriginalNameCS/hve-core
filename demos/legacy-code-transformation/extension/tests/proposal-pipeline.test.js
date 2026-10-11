@@ -7,6 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { generateModelProposal, validateEndpoint } = require('../src/foundry-adapter');
 const { generateProposalReport, writeProposalReport } = require('../src/proposal-report');
+const { expectedSampleCase, selectSampleInputs } = require('../src/sample-inputs');
 
 const modelContext = {
   target: { path: 'Target.js', symbol: 'calculate', source: null },
@@ -15,11 +16,13 @@ const modelContext = {
 const fakeEnv = { api_key: 'fake-test-credential', model: 'test-deployment', endpoint: 'https://test-resource.openai.azure.com' };
 
 function liveOptions(fetchImpl, consent = 'Send collected context') {
-  return { mode: 'live', env: fakeEnv, fetchImpl, vscode: { window: { showWarningMessage: async () => consent } } };
+  return { mode: 'live', changeRequest: 'Simplify nested conditionals while preserving behavior.', env: fakeEnv, fetchImpl,
+    vscode: { window: { showWarningMessage: async () => consent } } };
 }
 
 function response(proposal, overrides = {}) {
-  return { ok: true, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(proposal) }, ...overrides }] }) };
+  const payload = { ...proposal, pizzaCases: proposal.pizzaCases ?? [], nodeCases: proposal.nodeCases ?? [] };
+  return { ok: true, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(payload) }, ...overrides }] }) };
 }
 
 test('mock ignores configured environment and transport entirely', async () => {
@@ -40,17 +43,71 @@ test('live fake transport uses documented v1 auth and strict schema after exact 
     assert.ok(request.signal instanceof AbortSignal);
     const body = JSON.parse(request.body);
     assert.equal(body.model, fakeEnv.model);
-    assert.equal(body.messages[1].content, JSON.stringify(modelContext));
+    assert.equal(body.messages[1].content, `Requested refactor: ${options.changeRequest}`);
+    assert.equal(body.messages[2].content, JSON.stringify(modelContext));
+    assert.match(body.messages[0].content, /0\.10 increments/);
+    assert.match(body.messages[0].content, /"49\.90", "50\.00", and "50\.10"/);
     assert.equal(body.response_format.json_schema.strict, true);
     assert.equal(body.response_format.json_schema.schema.properties.evidence.items.properties.startLine.minimum, undefined);
     return response((await generateModelProposal(modelContext)).proposal);
   });
   options.vscode.window.showWarningMessage = async (message, modal) => {
     assert.equal(modal.modal, true);
+    assert.ok(modal.detail.includes('Destination: https://test-resource.openai.azure.com'));
+    assert.ok(modal.detail.includes(`Model: ${fakeEnv.model}`));
+    assert.ok(modal.detail.includes(`Requested refactor:\n${options.changeRequest}`));
     assert.ok(modal.detail.endsWith(JSON.stringify(modelContext)));
     return 'Send collected context';
   };
-  assert.equal((await generateModelProposal(modelContext, options)).status, 'ready');
+  const result = await generateModelProposal(modelContext, options);
+  assert.equal(result.status, 'ready');
+  assert.equal(result.changeRequest, options.changeRequest);
+});
+
+test('live output carries only bounded Node inputs and leaves expected results to the extension', async () => {
+  const context = { ...modelContext, target: { path: 'src/transfer.js', symbol: 'transfer', source: null } };
+  const proposal = (await generateModelProposal(context)).proposal;
+  const nodeCases = [
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 0 },
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 1 }
+  ];
+  const options = liveOptions(async (url, request) => {
+    const schema = JSON.parse(request.body).response_format.json_schema.schema;
+    assert.ok(schema.required.includes('nodeCases'));
+    assert.ok(schema.required.includes('pizzaCases'));
+    assert.equal(schema.properties.nodeCases.items.properties.expected, undefined);
+    return response({ ...proposal, pizzaCases: [], nodeCases });
+  });
+  const result = await generateModelProposal(context, options);
+  assert.deepEqual(result.sampleInputs, nodeCases);
+  assert.equal(result.proposal.nodeCases, undefined);
+  assert.deepEqual(expectedSampleCase(context.target, nodeCases[0]), {
+    result: { accepted: true, reason: null }, balances: { alice: 75, bob: 75 }
+  });
+});
+
+test('sample inputs reject unsafe shapes, out-of-range values and non-target cases', () => {
+  const target = { path: 'src/transfer.js', symbol: 'transfer' };
+  const valid = { accounts: [{ id: 'alice', balance: 100 }], sourceId: 'alice', destinationId: 'bob', amount: 1 };
+  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [valid] }, target), /three to five/);
+  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [valid, valid, valid] }, target), /valid, unique cases/);
+  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [
+    valid, valid, { ...valid, accounts: [{ id: '__proto__', balance: 1 }] }
+  ] }, target), /valid, unique cases/);
+  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [] }, target), /three to five/);
+  assert.equal(expectedSampleCase({ path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' },
+    { subtotal: '50.10', isMember: false }), '5.01');
+});
+
+test('pizza sample inputs accept the documented maximum subtotal', () => {
+  const target = { path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' };
+  const cases = [
+    { subtotal: '1000000.00', isMember: false },
+    { subtotal: '49.90', isMember: false },
+    { subtotal: '50.00', isMember: false }
+  ];
+  assert.deepEqual(selectSampleInputs({ pizzaCases: cases, nodeCases: [] }, target), cases);
 });
 
 test('live cancelled permission or missing modal never calls transport', async () => {
@@ -74,21 +131,43 @@ test('endpoint/config validation rejects arbitrary hosts, project endpoints, cre
   await assert.rejects(generateModelProposal(modelContext, { mode: 'automatic' }), /explicitly/);
 });
 
-test('refusal, non-JSON, HTTP and credential-bearing transport errors fail with redacted errors', async () => {
-  for (const fetchImpl of [
-    async () => response({}, { message: { refusal: fakeEnv.api_key } }),
-    async () => ({ ok: true, text: async () => fakeEnv.api_key }),
-    async () => ({ ok: false, text: async () => fakeEnv.api_key }),
-    async () => { throw new Error(fakeEnv.api_key); },
-    async () => response({ summary: fakeEnv.api_key }),
-    async () => response({}, { finish_reason: 'length' })
-  ]) {
+test('Live failures expose only safe stage diagnostics and never response credentials', async () => {
+  const failures = [
+    [async () => response({}, { message: { refusal: fakeEnv.api_key } }), /model refused/],
+    [async () => ({ ok: true, text: async () => fakeEnv.api_key }), /not valid bounded JSON/],
+    [async () => ({ ok: false, status: 401, text: async () => fakeEnv.api_key }), /HTTP 401/],
+    [async () => { throw new Error(fakeEnv.api_key); }, /Could not reach the configured Foundry endpoint/],
+    [async () => response({ summary: fakeEnv.api_key }), /configured credential and was discarded/],
+    [async () => response({}, { finish_reason: 'length' }), /response was incomplete/],
+    [async () => response({}, { message: { content: 'not JSON' } }), /not valid JSON/],
+    [async () => response({}, { message: {} }), /did not contain structured proposal content/]
+  ];
+  for (const [fetchImpl, expectedMessage] of failures) {
     await assert.rejects(generateModelProposal(modelContext, liveOptions(fetchImpl)), (error) => {
+      assert.equal(error.code, 'FOUNDRY_DIAGNOSTIC');
       assert.ok(!error.message.includes(fakeEnv.api_key));
-      assert.match(error.message, /Foundry request failed/);
+      assert.match(error.message, expectedMessage);
       return true;
     });
   }
+});
+
+test('Live response reports local pizza sample validation without echoing sample content', async () => {
+  const context = { ...modelContext, target: { path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' } };
+  const proposal = (await generateModelProposal(context)).proposal;
+  const invalidPizzaCases = [
+    { subtotal: '12.34', isMember: false },
+    { subtotal: '20.00', isMember: true },
+    { subtotal: '50.00', isMember: false }
+  ];
+  await assert.rejects(generateModelProposal(context, liveOptions(async () =>
+    response({ ...proposal, pizzaCases: invalidPizzaCases, nodeCases: [] }))), (error) => {
+    assert.equal(error.code, 'FOUNDRY_DIAGNOSTIC');
+    assert.match(error.message, /sample inputs failed local validation/);
+    assert.match(error.message, /subtotal was not a multiple of \$0\.10/);
+    assert.ok(!error.message.includes('12.34'));
+    return true;
+  });
 });
 
 test('finite timeout aborts a hung transport without fallback success', async () => {
@@ -161,7 +240,7 @@ test('pipeline rejects invented citations and edits outside the selected target 
     await assert.rejects(generateProposalReport(fixture.vscode, { ...fixture.input, mode: 'live' }, undefined, {
       env: fakeEnv,
       fetchImpl: async (url, request) => {
-        const collected = JSON.parse(JSON.parse(request.body).messages[1].content);
+        const collected = JSON.parse(JSON.parse(request.body).messages[2].content);
         const candidate = (await generateModelProposal(collected)).proposal;
         mutation(candidate);
         return response(candidate);

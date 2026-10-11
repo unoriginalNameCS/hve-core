@@ -9,6 +9,7 @@ const { isPathWithinRoot, resolveWorkspaceRoot } = require('./workspace-scope');
 const { generateModelProposal } = require('./foundry-adapter');
 const { renderProposalReport, validateProposal } = require('./proposal-contract');
 const { captureSourceSnapshot, assertSourceSnapshot } = require('./proposal-apply');
+const { expectedSampleCase, validateSampleInputs } = require('./sample-inputs');
 
 const DEFAULT_REPORT_DIRECTORY = 'reports/legacy-code-transformation';
 
@@ -168,24 +169,28 @@ async function generateProposalReport(vscode, input, token, options = {}) {
     validateReportDirectory(directory, discovery.files);
     const { target, evidenceCatalog } = await collectEvidence(vscode, root, discovery, token);
     const generated = await generateModelProposal({ target, evidenceCatalog }, {
-      mode: input.mode ?? 'mock', vscode, token, env: options.env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs
+      mode: input.mode ?? 'mock', vscode, token, env: options.env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs,
+      changeRequest: input.changeRequest
     });
     if (generated.status === 'cancelled') return { status: 'cancelled' };
     checkCancelled(token);
     if (!validateProposal(generated.proposal, evidenceCatalog, target).valid) {
-      throw new Error('Proposal rejected by target/evidence validation. No report was generated.');
+      throw Object.assign(new Error('Proposal rejected by target/evidence validation. No report was generated.'), { code: 'PROPOSAL_REJECTED' });
     }
+    const sampleInputs = validateSampleInputs(generated.sampleInputs ?? [], target, generated.mode === 'live');
     const proposal = generated.proposal;
     const proposalHash = contentHash(JSON.stringify(proposal));
     const targetSpanHash = target.source ? contentHash(target.source.text) : null;
     const evidenceHash = contentHash(JSON.stringify(evidenceCatalog));
     const markdown = renderProposalReport(proposal, evidenceCatalog, target, {
-      mode: generated.mode, discovery, proposalHash, targetSpanHash, evidenceHash
+      mode: generated.mode, discovery, proposalHash, targetSpanHash, evidenceHash, sampleInputs, expectedSampleCase,
+      changeRequest: generated.changeRequest
     });
     const reportPath = await writeProposalReport(root.realPath, directory, markdown, token, discovery.files);
     await assertSourceSnapshot(vscode, sourceSnapshot);
     return { status: 'ready', reportPath, reportHash: contentHash(Buffer.from(markdown, 'utf8')),
-      proposal, target, evidenceCatalog, proposalHash, targetSpanHash, evidenceHash, sourceSnapshot };
+      proposal, target, evidenceCatalog, sampleInputs, proposalHash, targetSpanHash, evidenceHash, sourceSnapshot,
+      mode: generated.mode, changeRequest: generated.changeRequest };
   } catch (error) {
     if (error.code === 'CANCELLED' || token?.isCancellationRequested) return { status: 'cancelled' };
     throw error;

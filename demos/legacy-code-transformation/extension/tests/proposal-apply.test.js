@@ -75,6 +75,7 @@ test('approved ID applies only exact span, keeps CRLF/BOM and immutable snapshot
     assert.equal(options.modal, true);
     assert.ok(options.detail.includes(fixture.targetFile));
     assert.match(options.detail, /Original:[\s\S]*Replacement:[\s\S]*Exact diff:/);
+    assert.match(options.detail, /proposed code executes[\s\S]*not an OS sandbox/);
     assert.ok(options.detail.includes(fixture.store.list()[0].proposalHash));
     return APPLY_LABEL;
   };
@@ -84,7 +85,11 @@ test('approved ID applies only exact span, keeps CRLF/BOM and immutable snapshot
   assert.equal(fixture.calls(), 1);
   assert.equal(fixture.store.list()[0].status, 'applied');
   assert.equal((await fixture.store.apply(fixture.vscode, fixture.id)).status, 'rejected');
-  assert.match(await fs.readFile(result.verificationReportPath, 'utf8'), /Verification: passed/);
+  const applicationReport = await fs.readFile(result.verificationReportPath, 'utf8');
+  assert.match(applicationReport, /Verification: passed/);
+  assert.match(applicationReport, /Application: applied/);
+  assert.match(applicationReport, new RegExp(`Applied source SHA-256: ${result.sourceHash}`));
+  assert.equal(require('../src/proposal-apply').hashBytes(await fs.readFile(fixture.targetFile)), result.sourceHash);
 });
 
 test('cancelled confirmation and wrong ID leave all source unchanged and never replay', async (context) => {
@@ -131,16 +136,13 @@ test('symlink escape fails closed before replay', async (context) => {
   assert.equal(fixture.calls(), 0);
 });
 
-test('changed harness and unsupported replacement fail closed without executing project content', async (context) => {
+test('changed harness fails closed without executing project content', async (context) => {
   const fixture = await project(context);
   const harness = path.join(fixture.root, 'src/PizzaEligibility/Program.cs');
   await fs.appendFile(harness, '\n// untrusted harness edit\n');
   assert.equal((await fixture.store.apply(fixture.vscode, fixture.id)).status, 'rejected');
   assert.equal(fixture.calls(), 0);
   assert.deepEqual(await fs.readFile(fixture.targetFile), fixture.bytes);
-  const changed = structuredClone(fixture.result);
-  changed.proposal.changes[0].replacementText = 'public static decimal CalculateDiscountAmount(decimal subtotal, bool isMember) { return 0m; }';
-  await assert.rejects(readControlledFixture(changed), /Apply disabled/);
 });
 
 test('even an in-root report directory symlink is rejected at registration and apply', async (context) => {
@@ -181,7 +183,9 @@ test('replay mismatch produces failure report without source mutation', async (c
   const id = await store.add(fixture.vscode, fixture.result);
   const result = await store.apply(fixture.vscode, id);
   assert.equal(result.status, 'failed');
-  assert.match(await fs.readFile(result.verificationReportPath, 'utf8'), /Replay outputs differ/);
+  const verificationReport = await fs.readFile(result.verificationReportPath, 'utf8');
+  assert.match(verificationReport, /Replay outputs differ/);
+  assert.match(verificationReport, /Application: not applied/);
   assert.deepEqual(await fs.readFile(fixture.targetFile), fixture.bytes);
 });
 
@@ -192,7 +196,11 @@ test('source mutation during replay is preserved and requires fresh generation',
     return { status: 'passed' };
   });
   const id = await store.add(fixture.vscode, fixture.result);
-  assert.equal((await store.apply(fixture.vscode, id)).status, 'rejected');
+  const result = await store.apply(fixture.vscode, id);
+  assert.equal(result.status, 'rejected');
+  const verificationReport = await fs.readFile(result.verificationReportPath, 'utf8');
+  assert.match(verificationReport, /Verification: passed/);
+  assert.match(verificationReport, /Application: not applied/);
   assert.ok((await fs.readFile(fixture.targetFile, 'utf8')).endsWith('// concurrent edit\n'));
 });
 
@@ -204,7 +212,11 @@ test('cancellation during verification leaves source unchanged', async (context)
     return { status: 'passed' };
   });
   const id = await store.add(fixture.vscode, fixture.result);
-  assert.equal((await store.apply(fixture.vscode, id, token)).status, 'cancelled');
+  const result = await store.apply(fixture.vscode, id, token);
+  assert.equal(result.status, 'cancelled');
+  const verificationReport = await fs.readFile(result.verificationReportPath, 'utf8');
+  assert.match(verificationReport, /Verification: passed/);
+  assert.match(verificationReport, /Application: not applied/);
   assert.deepEqual(await fs.readFile(fixture.targetFile), fixture.bytes);
 });
 
@@ -271,10 +283,20 @@ test('Node replay launches standalone node instead of the extension-host executa
 test('real dotnet tests and four before/after inputs run on disposable copy, never original fixture', async (context) => {
   const original = await fs.readFile(path.join(fixtureRoot, TARGET_PATH));
   const fixture = await project(context);
+  fixture.result.mode = 'live';
+  fixture.result.sampleInputs = [
+    { subtotal: '40.00', isMember: true },
+    { subtotal: '60.00', isMember: false },
+    { subtotal: '49.90', isMember: false }
+  ];
   const result = await verifyPizzaProposal(fixture.result);
   assert.equal(result.status, 'passed', JSON.stringify(result));
   assert.equal(result.baseline.cases.length, 4);
   assert.equal(result.transformed.cases.length, 4);
+  assert.equal(result.baseline.suggestedCases.length, 3);
+  assert.equal(result.transformed.suggestedCases.length, 3);
+  assert.deepEqual(result.baseline.suggestedCases.map((item) => [item.expectedOutput, item.passed]),
+    [['4.00', true], ['6.00', true], ['0.00', true]]);
   assert.match(result.baseline.tests.stdout, /Passed:\s+4/);
   assert.match(result.transformed.tests.stdout, /Passed:\s+4/);
   assert.deepEqual(result.baseline.cases.map((item) => item.stdout.trim()), ['2.50', '0.00', '5.00', '7.50']);
@@ -282,7 +304,7 @@ test('real dotnet tests and four before/after inputs run on disposable copy, nev
   assert.deepEqual(await fs.readFile(path.join(fixtureRoot, TARGET_PATH)), original);
 });
 
-test('real Node baseline and exact replacement pass reset-state tests and process replay without changing fixture', async (context) => {
+test('real Node baseline and alternate model replacement pass reset-state tests and process replay without changing fixture', async (context) => {
   const { NODE_HASHES, NODE_TARGET_PATH, NODE_BASELINE, NODE_REPLACEMENT } = require('../src/node-fixture');
   const { hashBytes } = require('../src/proposal-apply');
   const { verifyControlledProposal } = require('../src/fixture-replay');
@@ -301,18 +323,26 @@ test('real Node baseline and exact replacement pass reset-state tests and proces
   const candidate = { target: { path: NODE_TARGET_PATH, symbol: 'transfer', source: {
     text: NODE_BASELINE, startLine: 3, startCharacter: 0, endLine: 2 + NODE_BASELINE.split('\n').length, endCharacter: 1
   } }, sourceSnapshot: { rootPath: root, text, bytes: bytes.toString('base64'), fileHash: hashBytes(bytes) },
-  proposal: { changes: [{ replacementText: NODE_REPLACEMENT }] } };
+  mode: 'live', sampleInputs: [
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 0 },
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 1 }
+  ],
+  proposal: { changes: [{ replacementText: NODE_REPLACEMENT.replace(
+    '\n  if (!Object.hasOwn(accounts, sourceId))', '\n\n  if (!Object.hasOwn(accounts, sourceId))') }] } };
+  assert.notEqual(candidate.proposal.changes[0].replacementText, NODE_REPLACEMENT);
   const verification = await verifyControlledProposal(candidate);
   assert.equal(verification.status, 'passed', JSON.stringify(verification));
   assert.equal(verification.baseline.cases.length, 9);
   assert.equal(verification.transformed.cases.length, 9);
+  assert.equal(verification.baseline.suggestedCases.length, 3);
+  assert.equal(verification.transformed.suggestedCases.length, 3);
+  assert.ok(verification.baseline.suggestedCases.every((item) => item.passed));
+  assert.ok(verification.transformed.suggestedCases.every((item) => item.passed));
   assert.equal(JSON.parse(verification.baseline.tests.stdout).counts.passed, 8);
   assert.equal(JSON.parse(verification.transformed.tests.stdout).counts.passed, 8);
   assert.deepEqual(await fs.readFile(filePath), bytes);
   assert.deepEqual(await fs.readFile(path.join(originalRoot, NODE_TARGET_PATH)), bytes);
-  const unsupported = structuredClone(candidate);
-  unsupported.proposal.changes[0].replacementText += '\n';
-  await assert.rejects(readControlledFixture(unsupported), /Apply disabled/);
   await fs.appendFile(path.join(root, 'src/runner.js'), '\n');
   await assert.rejects(readControlledFixture(candidate), /fingerprint differs/);
 });

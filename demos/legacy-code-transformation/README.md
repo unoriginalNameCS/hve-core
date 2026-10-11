@@ -5,6 +5,8 @@ description: Current implementation, local usage, validation commands, and remai
 
 ## Status
 
+This standalone package provides the **Targeted Legacy Code Transformation Agent** workflow. For bounded codebase-wide discovery, use the separate [Codebase-Level Legacy Code Transformation demo](../legacy-codebase-transformation/README.md); its agent, tools, and session state are independently owned.
+
 The offline automation slice supports the .NET 10 pizza and Node.js 24.19 banking fixtures. The manually invoked agent and extension commands generate source-grounded Markdown proposals, then review and apply an exact stored proposal after controlled before/after verification. Both native development-host workflows passed against disposable copies. PowerShell-owned repository validation remains pending; no live Foundry call has been verified.
 
 The extension currently provides project-root-bounded discovery and focused source-evidence reads. For C# analysis, it asks for confirmation before invoking language providers or MSBuild. Declining uses syntax-only Roslyn parsing over source text already read inside the selected root. The separate Roslyn worker also has an MSBuild analysis path with static checks for explicit imports and out-of-root project, source, or task-assembly paths.
@@ -90,7 +92,7 @@ For a semantic preview of the controlled pizza fixture, choose **Continue with C
 
 Ask the agent to inspect the selected target and create a mock proposal. It reads focused test/caller evidence, then asks extension-owned permission to write a report. The report opens for review; the tool returns only its path, candidate ID and hashes, not an editable caller patch. The agent reads the report, presents the exact diff and unknowns, and waits for your application request. A generation request is not approval to apply.
 
-Request application only after reviewing the report. The ID-only apply tool then displays another mandatory exact-diff modal, even with tool auto-approval enabled. The extension runs controlled before/after tests and replay before the selected source write. The agent reads the separate verification report and reports the actual apply result; a pre-application verification report alone does not prove application succeeded. Discovery-only requests stop without writing a report.
+Request application only after reviewing the report. The ID-only apply tool then displays another mandatory exact-diff modal, even with tool auto-approval enabled. The extension runs controlled before/after tests and replay before the selected source write. The separate verification report records whether that write completed and, on success, the resulting source hash. Discovery-only requests stop without writing a report.
 
 ## Generate An Offline Proposal Report
 
@@ -107,6 +109,19 @@ Hidden, dependency, source directories, directories containing discovered source
 
 Reports retain editor references, caller edges, Roslyn diagnostics, text matches, collected tests/docs, and provider limitations separately from unverified model prose. Baseline inputs/outputs and test results say `not run`: this command does not execute project code or claim equivalence. Proposal, normalized target-span, and evidence-catalog SHA-256 values are recorded; the target-span hash is not a full-file hash or an approval token.
 
+In live mode, provide a refactor request, or use the default goal of improving readability and
+maintainability while preserving behavior. The extension shows the exact request and collected source
+context before sharing them with the configured model. The request is recorded in the proposal report
+and apply confirmation. The model also suggests three to five structured sample inputs for the
+controlled pizza or Node target. It cannot provide expected outputs, tests, commands, scripts, or code
+outside the selected target span. The extension validates and bounds the input data, then calculates
+expected results using fixture rules. The proposal report labels these as not run. During approved
+application, the fixed harness runs the same inputs against the original and proposed code and checks
+both results against those extension-owned expectations. Mock mode does not use custom refactor
+requests or generate supplemental inputs.
+
+This demo analyzes one selected target at a time. Whole-codebase analysis and dependency modernization are future capabilities; they are not supported by this workflow.
+
 ## Review And Apply A Controlled Proposal
 
 Use a disposable copy of either fixture, keeping the bundled source as the baseline. For pizza, copy its solution, source project and test project without `bin`/`obj`. For Node, copy its manifest, JavaScript project configuration, source and test files. Open that copy as the workspace root.
@@ -115,20 +130,34 @@ Use a disposable copy of either fixture, keeping the bundled source as the basel
 2. Run **Legacy Code Transformation: Review and Apply Proposal** and select the stored candidate.
 3. Review the mandatory modal's exact affected file, original, replacement, diff, proposal ID, proposal hash, and full source-file hash. Cancel leaves source unchanged.
 4. Confirm **Apply exact proposal**. The extension verifies the fixed fixture tests and replay on an isolated temporary copy before writing the exact approved span to the selected source.
-5. Review the separate verification Markdown report that opens. It records owned process commands, test stdout/stderr/exit codes, inputs/outputs, visible working-directory file changes, and coverage limitations. It records pre-application verification, not a claim that application occurred.
+5. Review the verification and application Markdown report that opens. It records owned process commands, test stdout/stderr/exit codes, inputs/outputs, visible working-directory file changes, verification status, and coverage limits. After a successful source write, it records `Application: applied` and the resulting source hash. A failed verification or a cancelled/rejected post-verification apply records that the source was not applied.
 
 Candidates are deeply immutable and memory-only for the current extension-host lifetime. No-change reports are not candidates. Generation captures the full saved UTF-8 source bytes and document version before discovery; apply rechecks them and the original report hash before and after confirmation, after replay, and before writing.
 Report edits, dirty source/report buffers, changed document versions, changed source anywhere in the file, or changed roots invalidate application. Stale candidates remain listed but cannot apply; generate a revised report and obtain fresh approval.
 
 Application preserves UTF-8 BOM and LF/CRLF bytes outside the exact line/character span. Mixed line endings are unsupported. The report is never edited to insert test claims: observed evidence goes into a new, exclusively written Markdown report in the same safe artifact directory.
 
-Only the exact known replacement and six fingerprint-checked files for each selected fixture are executable. The selector rejects modified source/harnesses or unsupported replacements before execution. It copies only those files and ignores other project content. Pizza uses fixed `dotnet` arguments, a public-source NuGet configuration and disabled inherited MSBuild directory imports.
-Node uses the installed Node executable, real builtin tests with structured JSON summaries, eight reset-state inputs and one fixed CLI error case. Both use native spawn without a shell, a restricted child environment excluding `api_key`, `model`, `endpoint` and `NODE_OPTIONS`, cancellation, finite timeouts and bounded output.
-Modified harnesses, other replacements, and arbitrary selected projects cannot apply. A replay mismatch, launch failure, timeout, or cancellation leaves the selected source unchanged; there is no rollback over concurrent user edits or automatic repair.
+For the two pinned fixtures, a single replacement of the selected target span can be verified,
+including a live model proposal that differs from the mock replacement. The selector rejects changed
+fixture files, other targets, and multi-file edits before execution. It copies only the six
+fingerprint-checked files and ignores other project content. Pizza uses fixed `dotnet` arguments, a
+public-source NuGet configuration and disabled inherited MSBuild directory imports.
+
+Node uses the installed Node executable, real builtin tests with structured JSON summaries, eight
+reset-state inputs and one fixed CLI error case. Both use native spawn without a shell, a restricted
+child environment excluding `api_key`, `model`, `endpoint` and `NODE_OPTIONS`, cancellation, finite
+timeouts and bounded output.
+
+The approved replacement executes during verification in a disposable copy. That copy is not an
+operating-system sandbox, so review the exact diff and continue only if you trust the proposed code.
+Model-suggested sample inputs are data passed to fixed extension-owned runners, not model-authored
+test code. Modified harnesses and arbitrary selected projects cannot apply. A replay mismatch,
+launch failure, timeout, or cancellation leaves the selected source unchanged; there is no rollback
+over concurrent user edits or automatic repair.
 
 The registered `legacy_code_transformation_demo_apply_proposal` tool accepts only a stored proposal ID, never a patch or caller approval flag. It is registered only when extension-owned confirmation is available and uses the same store and gate as the command. Tool auto-approval does not bypass the modal. Generation through chat and commands shares candidates; no candidate survives an extension-host restart.
 
-Each pristine fixture supports the approved exact change once. After application its fingerprint differs, the old ID is consumed, and the deterministic mock produces no further edit. Use a new pristine copy for another demonstration; do not expect automatic rollback or successive model-generated transformations.
+Each pristine fixture supports one approved transformation. After application its fingerprint differs and the old ID is consumed. Use a new pristine copy for another demonstration; do not expect automatic rollback or successive transformations.
 
 Passing fixture tests and representative inputs is sampled evidence, not formal equivalence. Replay compares stdout, stderr, exit codes, JSON banking balances, and visible files in each working directory. External, network, timing and hidden environment effects remain unknown; a disposable copy is not an operating-system sandbox. Java and arbitrary-project execution are unsupported.
 
@@ -145,7 +174,7 @@ Live mode is optional and must be explicitly requested and selected for each com
 Restart the VS Code extension development host after changing its inherited environment. A value set only in an already-open integrated terminal does not update the existing extension-host process. No `.env` loader is included; do not commit `.env` files or real secrets. API keys are not stored in VS Code SecretStorage, reports, or logs.
 
 The extension-owned modal displays the destination, model, and exact collected context before sending it. Declining sends nothing and writes no report. Only HTTPS resource endpoints are accepted; project endpoints, arbitrary hosts, user information, ports, queries, and fragments are rejected.
-The adapter uses native `fetch`, `api-key` authentication, and strict JSON Schema at `/openai/v1/chat/completions`, with no redirects, a finite timeout, cancellation, and bounded generic errors. Refusal, invalid JSON, invalid citations, or transport failure is a failure, not mock fallback success.
+The adapter uses native `fetch`, `api-key` authentication, and strict JSON Schema at `/openai/v1/chat/completions`, with no redirects, a finite timeout, cancellation, and bounded diagnostics for network, HTTP status, refusal, incomplete output, response parsing, and local sample-input validation. Diagnostics never include response bodies, source context, endpoint values, or credentials. Refusal, invalid JSON, invalid citations, or transport failure is a failure, not mock fallback success.
 
 The endpoint/request contract follows Microsoft's [v1 API lifecycle](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle) and [structured outputs REST documentation](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs). Live resource compatibility and permission to share source require separate verification; no live request was made during implementation.
 
@@ -160,7 +189,7 @@ Repeated demonstrations require pristine disposable copies and separate host-lau
 * Use only the controlled pizza fixture when exercising MSBuild loading. Native smoke coverage is limited to the two known controlled baselines.
 * MSBuild design-time targets may invoke project-defined tasks. The separate BuildHost process is not a sandbox. Confirm before C# provider or MSBuild analysis.
 * If confirmation is declined or root preflight rejects a project, report syntax-only results and text matches as lower-fidelity evidence; do not describe them as semantic references.
-* Do not run arbitrary project tests or scripts as a behavior-capture harness. Only the pinned pizza and Node harnesses and their exact known replacements are supported.
+* Do not run arbitrary project tests or scripts as a behavior-capture harness. Only one-span replacements for the pinned pizza and Node targets, verified with their unchanged harnesses and bounded structured inputs, are supported.
 * Do not send non-demo source to Foundry until its endpoint is configured and data-handling permission is confirmed.
 
 ## How The Workflow Works

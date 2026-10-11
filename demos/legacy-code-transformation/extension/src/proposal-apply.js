@@ -7,6 +7,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { isPathWithinRoot, resolveWorkspaceRoot } = require('./workspace-scope');
 const { validateRelativePath } = require('./source-evidence');
 const { validateProposal } = require('./proposal-contract');
+const { validateSampleInputs } = require('./sample-inputs');
 
 const APPLY_TOOL = 'legacy_code_transformation_demo_apply_proposal';
 const APPLY_LABEL = 'Apply exact proposal';
@@ -107,12 +108,13 @@ function proposalDetail(candidate) {
   const change = candidate.proposal.changes[0];
   const removed = change.originalText.split('\n').map((line) => `-${line}`).join('\n');
   const added = change.replacementText.split('\n').map((line) => `+${line}`).join('\n');
-  return `Proposal ID: ${candidate.id}\nProposal SHA-256: ${candidate.proposalHash}\nSource SHA-256: ${candidate.sourceSnapshot.fileHash}\n` +
+  const request = candidate.changeRequest ? `Requested refactor: ${candidate.changeRequest}\n` : '';
+  return `${request}Proposal ID: ${candidate.id}\nProposal SHA-256: ${candidate.proposalHash}\nSource SHA-256: ${candidate.sourceSnapshot.fileHash}\n` +
     `Affected file: ${path.join(candidate.sourceSnapshot.rootPath, change.path)}\n` +
     `Original:\n${change.originalText}\nReplacement:\n${change.replacementText}\n` +
     `Exact diff:\n--- ${change.path}\n+++ ${change.path}\n${removed}\n${added}\n` +
-    'After confirmation, pinned fixture tests and representative inputs run on a disposable copy first. Failure or cancellation leaves source unchanged. ' +
-    'Coverage is sampled, not an equivalence proof or an OS sandbox.';
+    'After confirmation, the proposed code executes in pinned fixture tests and representative inputs on a disposable copy. The copy is not an OS sandbox. ' +
+    'Continue only if you trust this proposal. Failure or cancellation leaves source unchanged. Coverage is sampled, not an equivalence proof.';
 }
 
 function writeExactSource(vscode, candidate, bytes, token) {
@@ -174,6 +176,7 @@ class ProposalCandidateStore {
   async add(vscode, result) {
     if (result.status !== 'ready' || result.proposal.changes.length === 0) return null;
     const candidate = structuredClone({ ...result, id: randomUUID() });
+    candidate.sampleInputs = validateSampleInputs(candidate.sampleInputs ?? [], candidate.target, candidate.mode === 'live');
     if (!validateProposal(candidate.proposal, candidate.evidenceCatalog, candidate.target).valid ||
         hashBytes(JSON.stringify(candidate.proposal)) !== candidate.proposalHash ||
         hashBytes(JSON.stringify(candidate.evidenceCatalog)) !== candidate.evidenceHash ||
@@ -212,6 +215,7 @@ class ProposalCandidateStore {
     const { candidate } = entry;
     this.#active.add(proposalId);
     let verificationReportPath;
+    let verification;
     try {
       await this.#assertCurrent(vscode, candidate, token);
       await require('./fixture-replay').readControlledFixture(candidate);
@@ -221,13 +225,13 @@ class ProposalCandidateStore {
       checkCancelled(token);
       if (choice !== APPLY_LABEL) return { status: 'cancelled' };
       await this.#assertCurrent(vscode, candidate, token);
-      const verification = await this.#verifier(candidate, token);
+      verification = await this.#verifier(candidate, token);
       checkCancelled(token);
       const { writeProposalReport } = require('./proposal-report');
       const { renderVerificationReport } = require('./fixture-replay');
-      verificationReportPath = await writeProposalReport(candidate.sourceSnapshot.rootPath,
-        path.posix.dirname(candidate.reportRelativePath), renderVerificationReport(candidate, verification), token);
       if (verification.status !== 'passed') {
+        verificationReportPath = await writeProposalReport(candidate.sourceSnapshot.rootPath,
+          path.posix.dirname(candidate.reportRelativePath), renderVerificationReport(candidate, verification), token);
         entry.status = 'failed';
         return { status: 'failed', reason: 'Controlled verification failed; revised proposal required.', verificationReportPath };
       }
@@ -238,8 +242,25 @@ class ProposalCandidateStore {
       await safeFile(candidate.sourceSnapshot.rootPath, candidate.sourceSnapshot.path);
       writeExactSource(vscode, candidate, bytes, token);
       entry.status = 'applied';
-      return { status: 'applied', proposalId, verificationReportPath, sourceHash: hashBytes(bytes) };
+      const sourceHash = hashBytes(bytes);
+      try {
+        verificationReportPath = await writeProposalReport(candidate.sourceSnapshot.rootPath,
+          path.posix.dirname(candidate.reportRelativePath),
+          renderVerificationReport(candidate, verification, { status: 'applied', sourceHash }));
+      } catch {
+        return { status: 'applied', proposalId, sourceHash,
+          reportWarning: 'Source was applied, but the final application report could not be written.' };
+      }
+      return { status: 'applied', proposalId, verificationReportPath, sourceHash };
     } catch (error) {
+      if (verification && !verificationReportPath) {
+        try {
+          const { writeProposalReport } = require('./proposal-report');
+          const { renderVerificationReport } = require('./fixture-replay');
+          verificationReportPath = await writeProposalReport(candidate.sourceSnapshot.rootPath,
+            path.posix.dirname(candidate.reportRelativePath), renderVerificationReport(candidate, verification));
+        } catch {}
+      }
       if (error.code === 'CANCELLED' || token?.isCancellationRequested) return { status: 'cancelled', verificationReportPath };
       entry.status = 'stale';
       return { status: 'rejected', reason: error.message, verificationReportPath };

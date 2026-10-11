@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { renderProposalReport, validateProposal } = require('../src/proposal-contract');
+const { expectedSampleCase } = require('../src/sample-inputs');
 
 const evidence = [{
   id: 'E1',
@@ -62,6 +63,29 @@ test('report renderer includes only validated evidence and exact proposed text',
   assert.match(rendered, /src\/Calculator\.cs`?:10-12/);
   assert.match(rendered, /return CalculateValue\(\);/);
   assert.match(rendered, /No source files were changed or validated/);
+});
+
+test('report renderer shows local expectations for supplemental inputs before they run', () => {
+  const targetPath = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
+  const candidate = proposal();
+  candidate.target.path = targetPath;
+  candidate.target.symbol = 'CalculateDiscountAmount';
+  candidate.evidence[0].path = targetPath;
+  candidate.changes[0].path = targetPath;
+  const fixtureEvidence = evidence.map((item) => ({ ...item, path: targetPath }));
+  const rendered = renderProposalReport(candidate, fixtureEvidence, candidate.target, {
+    mode: 'live', discovery: { target: { resolution: 'unique' } }, proposalHash: 'proposal',
+    targetSpanHash: 'target', evidenceHash: 'evidence',
+    sampleInputs: [{ subtotal: '50.00', isMember: false }], expectedSampleCase,
+    changeRequest: 'Simplify nested conditionals while preserving behavior.'
+  });
+
+  assert.match(rendered, /## Requested Refactor/);
+  assert.match(rendered, /Simplify nested conditionals while preserving behavior/);
+  assert.match(rendered, /Supplemental Sample Inputs/);
+  assert.match(rendered, /Expected by fixture rules/);
+  assert.match(rendered, /"5\.00"/);
+  assert.match(rendered, /These cases have not run yet/);
 });
 
 test('report renderer escapes model prose from Markdown structure', () => {

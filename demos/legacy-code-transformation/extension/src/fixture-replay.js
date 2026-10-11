@@ -6,6 +6,7 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { hashBytes, safeFile, replacementBytes } = require('./proposal-apply');
 const { NODE_TARGET_PATH, NODE_REPLACEMENT, NODE_HASHES, NODE_CASES } = require('./node-fixture');
+const { expectedSampleCase, validateSampleInputs } = require('./sample-inputs');
 
 const TARGET_PATH = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
 const FIXTURE_HASHES = Object.freeze({
@@ -37,12 +38,14 @@ function cancelled(token) {
 
 function controlledDefinition(candidate) {
   if (candidate.proposal.changes.length === 1) {
-    if (candidate.target.path === TARGET_PATH && candidate.target.symbol === 'CalculateDiscountAmount' &&
-        candidate.proposal.changes[0].replacementText === KNOWN_REPLACEMENT) return { hashes: FIXTURE_HASHES, targetPath: TARGET_PATH, kind: 'pizza' };
-    if (candidate.target.path === NODE_TARGET_PATH && candidate.target.symbol === 'transfer' &&
-        candidate.proposal.changes[0].replacementText === NODE_REPLACEMENT) return { hashes: NODE_HASHES, targetPath: NODE_TARGET_PATH, kind: 'node' };
+    if (candidate.target.path === TARGET_PATH && candidate.target.symbol === 'CalculateDiscountAmount') {
+      return { hashes: FIXTURE_HASHES, targetPath: TARGET_PATH, kind: 'pizza' };
+    }
+    if (candidate.target.path === NODE_TARGET_PATH && candidate.target.symbol === 'transfer') {
+      return { hashes: NODE_HASHES, targetPath: NODE_TARGET_PATH, kind: 'node' };
+    }
   }
-  throw new Error('Apply disabled: no equivalent controlled verification is configured for this target or replacement.');
+  throw new Error('Apply disabled: controlled verification is configured only for one-span edits to the pinned pizza and Node targets.');
 }
 
 async function readControlledFixture(candidate) {
@@ -125,9 +128,18 @@ async function visibleFiles(directory) {
   return files;
 }
 
+function sameObservedCases(before, after) {
+  return before.length === after.length && before.every((item, index) => {
+    const transformed = after[index];
+    return item.stdout === transformed.stdout && item.stderr === transformed.stderr && item.exitCode === transformed.exitCode &&
+      JSON.stringify(item.visibleFilesAfter) === JSON.stringify(transformed.visibleFilesAfter);
+  });
+}
+
 async function verifyPizzaProposal(candidate, token) {
   cancelled(token);
   if (controlledDefinition(candidate).kind !== 'pizza') throw new Error('Expected controlled pizza target.');
+  const sampleInputs = validateSampleInputs(candidate.sampleInputs ?? [], candidate.target, candidate.mode === 'live');
   const files = await readControlledFixture(candidate);
   const fixtureHashes = Object.fromEntries(Object.entries(files).map(([relativePath, bytes]) => [relativePath, hashBytes(bytes)]));
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-pizza-replay-'));
@@ -152,7 +164,7 @@ async function verifyPizzaProposal(candidate, token) {
     if (restore.exitCode !== 0) throw new Error('Controlled restore failed.');
     const stage = async () => {
       const tests = await runDotnet(['test', 'PizzaEligibility.sln', '--no-restore', '--verbosity', 'minimal', ...buildFlags], directory, token);
-      const result = { tests, cases: [] };
+      const result = { tests, cases: [], suggestedCases: [] };
       if (tests.exitCode !== 0 || !/Failed:\s+0/.test(tests.stdout) || !/Passed:\s+4/.test(tests.stdout) || !/Total:\s+4/.test(tests.stdout)) {
         result.passed = false;
         return result;
@@ -166,9 +178,21 @@ async function verifyPizzaProposal(candidate, token) {
         const after = await visibleFiles(runDirectory);
         result.cases.push({ input: [...scenario.input], ...processResult, visibleFilesBefore: before, visibleFilesAfter: after });
       }
+      for (const input of sampleInputs) {
+        const runDirectory = await fs.mkdtemp(path.join(directory, 'suggested-case-'));
+        const before = await visibleFiles(runDirectory);
+        const processResult = await runDotnet([program, input.subtotal, String(input.isMember)], runDirectory, token);
+        const after = await visibleFiles(runDirectory);
+        const expectedOutput = expectedSampleCase(candidate.target, input);
+        const passed = processResult.exitCode === 0 && processResult.stderr === '' &&
+          processResult.stdout === `${expectedOutput}${os.EOL}` && JSON.stringify(before) === JSON.stringify(after);
+        result.suggestedCases.push({ input, expectedOutput, ...processResult, passed,
+          visibleFilesBefore: before, visibleFilesAfter: after });
+      }
       result.passed = result.cases.every((item, index) => item.exitCode === 0 && item.stderr === '' &&
         item.stdout === `${PIZZA_CASES[index].output}${os.EOL}` &&
-        JSON.stringify(item.visibleFilesBefore) === JSON.stringify(item.visibleFilesAfter));
+        JSON.stringify(item.visibleFilesBefore) === JSON.stringify(item.visibleFilesAfter)) &&
+        result.suggestedCases.every((item) => item.passed);
       return result;
     };
     observations.baseline = await stage();
@@ -176,11 +200,10 @@ async function verifyPizzaProposal(candidate, token) {
     await fs.writeFile(path.join(directory, TARGET_PATH), replacementBytes(candidate));
     observations.transformed = await stage();
     if (!observations.transformed.passed || observations.baseline.tests.stderr !== observations.transformed.tests.stderr ||
-        observations.baseline.cases.some((before, index) => {
-          const after = observations.transformed.cases[index];
-          return before.stdout !== after.stdout || before.stderr !== after.stderr || before.exitCode !== after.exitCode ||
-            JSON.stringify(before.visibleFilesAfter) !== JSON.stringify(after.visibleFilesAfter);
-        })) throw new Error('Transformed tests or replay differed; revised proposal required.');
+        !sameObservedCases(observations.baseline.cases, observations.transformed.cases) ||
+        !sameObservedCases(observations.baseline.suggestedCases, observations.transformed.suggestedCases)) {
+      throw new Error('Transformed tests or replay differed; revised proposal required.');
+    }
     await assertFixtureHashes(candidate, fixtureHashes);
     cancelled(token);
     observations.status = 'passed';
@@ -201,6 +224,7 @@ function runNode(args, cwd, token, timeoutMs = 30000, spawnProcess = spawn) {
 async function verifyNodeProposal(candidate, token) {
   cancelled(token);
   if (controlledDefinition(candidate).kind !== 'node') throw new Error('Expected controlled Node target.');
+  const sampleInputs = validateSampleInputs(candidate.sampleInputs ?? [], candidate.target, candidate.mode === 'live');
   const files = await readControlledFixture(candidate);
   const fixtureHashes = Object.fromEntries(Object.entries(files).map(([relativePath, bytes]) => [relativePath, hashBytes(bytes)]));
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-replay-'));
@@ -221,7 +245,7 @@ async function verifyNodeProposal(candidate, token) {
     const stage = async () => {
       const testCode = "const {run}=require('node:test');run({files:[process.argv[1]],isolation:'none'}).on('test:summary',summary=>{if(!summary.file){process.stdout.write(JSON.stringify({success:summary.success,counts:summary.counts})+'\\n');if(!summary.success)process.exitCode=1;}});";
       const tests = await runNode(['-e', testCode, path.join(directory, 'tests/transfer.test.js')], directory, token);
-      const result = { tests, cases: [], passed: false };
+      const result = { tests, cases: [], suggestedCases: [], passed: false };
       const summary = JSON.parse(tests.stdout);
       if (tests.exitCode !== 0 || tests.stderr !== '' || !summary.success || summary.counts.passed !== 8 ||
           summary.counts.failed !== 0 || summary.counts.cancelled !== 0 || summary.counts.skipped !== 0) return result;
@@ -237,18 +261,30 @@ async function verifyNodeProposal(candidate, token) {
           JSON.stringify(output) === JSON.stringify(expected) && JSON.stringify(before) === JSON.stringify(after);
         result.cases.push({ input: scenario.input, ...processResult, output, passed, visibleFilesBefore: before, visibleFilesAfter: after });
       }
-      result.passed = result.cases.every((scenario) => scenario.passed);
+      const sampleRunner = "const {transfer}=require(process.argv[1]);const sample=JSON.parse(process.argv[2]);const accounts=Object.fromEntries(sample.accounts.map(({id,balance})=>[id,balance]));const result=transfer(accounts,sample.sourceId,sample.destinationId,sample.amount);process.stdout.write(JSON.stringify({result,balances:accounts})+'\\n');";
+      for (const input of sampleInputs) {
+        const runDirectory = await fs.mkdtemp(path.join(directory, 'suggested-case-'));
+        const before = await visibleFiles(runDirectory);
+        const processResult = await runNode(['-e', sampleRunner, path.join(directory, NODE_TARGET_PATH), JSON.stringify(input)], runDirectory, token);
+        const after = await visibleFiles(runDirectory);
+        const output = JSON.parse(processResult.stdout);
+        const expectedOutput = expectedSampleCase(candidate.target, input);
+        const passed = processResult.exitCode === 0 && processResult.stderr === '' &&
+          JSON.stringify(output) === JSON.stringify(expectedOutput) && JSON.stringify(before) === JSON.stringify(after);
+        result.suggestedCases.push({ input, expectedOutput, ...processResult, output, passed,
+          visibleFilesBefore: before, visibleFilesAfter: after });
+      }
+      result.passed = result.cases.every((scenario) => scenario.passed) && result.suggestedCases.every((scenario) => scenario.passed);
       return result;
     };
     observations.baseline = await stage();
     if (!observations.baseline.passed) throw new Error('Baseline Node tests or reset-state replay failed.');
     await fs.writeFile(path.join(directory, NODE_TARGET_PATH), replacementBytes(candidate));
     observations.transformed = await stage();
-    if (!observations.transformed.passed || observations.baseline.cases.some((before, index) => {
-      const after = observations.transformed.cases[index];
-      return before.stdout !== after.stdout || before.stderr !== after.stderr || before.exitCode !== after.exitCode ||
-        JSON.stringify(before.visibleFilesAfter) !== JSON.stringify(after.visibleFilesAfter);
-    })) throw new Error('Transformed Node tests or replay differed; revised proposal required.');
+    if (!observations.transformed.passed || !sameObservedCases(observations.baseline.cases, observations.transformed.cases) ||
+        !sameObservedCases(observations.baseline.suggestedCases, observations.transformed.suggestedCases)) {
+      throw new Error('Transformed Node tests or replay differed; revised proposal required.');
+    }
     await assertFixtureHashes(candidate, fixtureHashes);
     cancelled(token);
     observations.status = 'passed';
@@ -266,11 +302,15 @@ function verifyControlledProposal(candidate, token) {
   return controlledDefinition(candidate).kind === 'node' ? verifyNodeProposal(candidate, token) : verifyPizzaProposal(candidate, token);
 }
 
-function renderVerificationReport(candidate, verification) {
+function renderVerificationReport(candidate, verification, application = { status: 'not-applied' }) {
+  const applicationResult = application.status === 'applied' ?
+    `Application: applied\n\nApplied source SHA-256: ${application.sourceHash}` :
+    'Application: not applied. The selected source was left unchanged.';
   return `---\ntitle: Controlled Fixture Verification\ndescription: Extension-owned disposable fixture observations.\n---\n\n` +
     `## Result\n\nVerification: ${verification.status}\n\nProposal ID: ${candidate.id}\n\nProposal SHA-256: ${candidate.proposalHash}\n\n` +
-    `Source SHA-256: ${candidate.sourceSnapshot.fileHash}\n\nThis records pre-application verification, not proof that source was applied. ` +
-    `The reviewed proposal report is unchanged. A failed result requires a revised proposal.\n\n` +
+    `Source SHA-256 before application: ${candidate.sourceSnapshot.fileHash}\n\n${applicationResult}\n\n` +
+    `The application status is recorded only after the source write completes. The reviewed proposal report is unchanged. ` +
+    `A failed verification requires a revised proposal.\n\n` +
     `## Owned Process Observations\n\n\`\`\`json\n${JSON.stringify(verification, null, 2)}\n\`\`\`\n`;
 }
 

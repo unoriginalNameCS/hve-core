@@ -1,0 +1,101 @@
+{
+  "name": "legacy-codebase-transformation-demo",
+  "displayName": "Legacy Codebase Transformation Demo",
+  "description": "A bounded, approval-gated codebase refactoring review proof of concept.",
+  "version": "0.1.0",
+  "publisher": "hve-core-demo",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-scan.js && node --check src/scan-pipeline.js && node --check src/finding-store.js && node --check src/model-selection.js && node --check src/proposal-workflow.js",
+    "test": "node --test"
+  },
+  "contributes": {
+    "chatAgents": [
+      {
+        "path": "./agents/codebase-level-legacy-code-transformation.agent.md"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "legacy_codebase_transformation_demo_scan_workspace",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_scan_workspace",
+        "displayName": "Scan workspace for refactoring findings",
+        "modelDescription": "Scan supported C#, JavaScript, and TypeScript source beneath the exact opened workspace root. Select a model, then show scope, file count, bytes, request count, model, and destination before any source is sent. Stop at 30 requests or 30 findings, validate every reported span against collected source, and report incomplete counts. No project commands or source writes.",
+        "userDescription": "Run a bounded model-assisted scan after per-scan source-sharing confirmation.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["projectRoot"],
+          "properties": {
+            "projectRoot": {
+              "type": "string",
+              "description": "Absolute path that exactly matches an open VS Code workspace folder."
+            }
+          }
+        },
+        "tags": ["readOnly"]
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_review_findings",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_review_findings",
+        "displayName": "Review scan findings",
+        "modelDescription": "List, refresh, select, dismiss, or explicitly approve a session-bound finding from the latest codebase scan. Refresh rechecks its root and source hash. Finding approval permits proposal drafting only and never authorizes writing.",
+        "userDescription": "Inspect and disposition current findings; approval uses a separate extension confirmation.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "type": "string", "enum": ["list", "refresh", "select", "dismiss", "approve"] },
+            "findingId": { "type": "string" }
+          }
+        },
+        "tags": ["readOnly"]
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_generate_proposal",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_generate_proposal",
+        "displayName": "Draft proposal from an approved finding",
+        "modelDescription": "Accept only a current extension-owned finding ID after explicit finding approval. Recollect and validate its exact source span, then request separate per-proposal consent showing the source context, change request, model, and destination. Return one unverified replacement for the finding span. This tool never writes source.",
+        "userDescription": "Draft one exact-span proposal after finding approval and separate source-sharing consent.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["findingId"],
+          "properties": {
+            "findingId": { "type": "string" },
+            "changeRequest": { "type": "string", "maxLength": 1000 }
+          }
+        },
+        "tags": ["proposalBound"]
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_apply_proposal",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_apply_proposal",
+        "displayName": "Apply an exactly approved proposal",
+        "modelDescription": "Accept only a proposal ID from the extension-owned pending proposal queue. Revalidate the approved finding, workspace root, source version and hash, exact span, proposal hash, and report hash. Show the exact original and replacement in a separate modal confirmation, revalidate again, then apply only that span and save. Never run project tests or commands.",
+        "userDescription": "Apply one pending proposal only after you review and approve its exact diff.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proposalId"],
+          "properties": { "proposalId": { "type": "string" } }
+        },
+        "tags": ["writesWorkspace"]
+      }
+    ]
+  }
+}
