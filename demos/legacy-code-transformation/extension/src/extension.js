@@ -27,29 +27,29 @@ class GenerateProposalReportTool {
 		let metadata;
 		try {
 			const input = options.input;
-			if (!input || Object.keys(input).some((key) => !['projectRoot', 'targetFile', 'targetSymbol', 'mode', 'changeRequest'].includes(key)) ||
+			if (!input || Object.keys(input).some((key) => !['projectRoot', 'targetFile', 'targetSymbol', 'changeRequest'].includes(key)) ||
 				!['projectRoot', 'targetFile', 'targetSymbol'].every((key) => typeof input[key] === 'string' && input[key].trim()) ||
-				!['mock', 'live'].includes(input.mode ?? 'mock') ||
-				(input.changeRequest !== undefined && (input.mode !== 'live' || typeof input.changeRequest !== 'string' ||
+				(input.changeRequest !== undefined && (typeof input.changeRequest !== 'string' ||
 					!input.changeRequest.trim() || input.changeRequest.length > MAX_REFACTOR_REQUEST_LENGTH))) {
-				throw new Error('Invalid report tool input. Live refactor requests require Live mode and must be 1,000 characters or fewer.');
+				throw new Error('Invalid report tool input. A live refactor request must be 1,000 characters or fewer.');
 			}
 			const root = await resolveWorkspaceRoot(input.projectRoot, this.vscode.workspace.workspaceFolders);
 			const reportDirectory = this.vscode.workspace.getConfiguration('legacyCodeTransformation', root.uri)
 				.get('reportDirectory', DEFAULT_REPORT_DIRECTORY);
 			if (token?.isCancellationRequested) return this.result({ status: 'cancelled' });
 			const consent = await this.vscode.window.showWarningMessage('Generate and write a proposal report without changing source?',
-				{ modal: true, detail: `Root: ${root.realPath}\nSource: ${input.targetFile}\nSymbol: ${input.targetSymbol}\nMode: ${input.mode ?? 'mock'}\n${input.mode === 'live' ? `Requested refactor: ${input.changeRequest ?? DEFAULT_REFACTOR_REQUEST}\n` : ''}Artifact directory: ${reportDirectory}\nLive mode requires a separate exact-context sharing confirmation. Tests are not run by generation.` },
+				{ modal: true, detail: `Root: ${root.realPath}\nSource: ${input.targetFile}\nSymbol: ${input.targetSymbol}\nMode: Live Foundry\nRequested refactor: ${input.changeRequest ?? DEFAULT_REFACTOR_REQUEST}\nArtifact directory: ${reportDirectory}\nA separate exact-context sharing confirmation follows. For the pinned pizza and Node fixtures, baseline tests and sample cases run in disposable copies; arbitrary project code is not executed. Source files are not changed.` },
 				'Generate report');
 			if (consent !== 'Generate report' || token?.isCancellationRequested) return this.result({ status: 'cancelled' });
 			const generated = await generateProposalReport(this.vscode, { ...input, reportDirectory }, token, this.options);
 			if (generated.status !== 'ready') return this.result({ status: generated.status });
 			const proposalId = await this.store.add(this.vscode, generated);
 			await this.vscode.window.showTextDocument(await this.vscode.workspace.openTextDocument(this.vscode.Uri.file(generated.reportPath)), { preview: false });
-			metadata = { status: 'ready', mode: input.mode ?? 'mock', proposalId, hasChanges: proposalId !== null,
+			metadata = { status: 'ready', mode: 'live', proposalId, hasChanges: proposalId !== null,
 				reportPath: generated.reportPath, reportRelativePath: path.relative(root.realPath, generated.reportPath).split(path.sep).join('/'),
 				proposalHash: generated.proposalHash, sourceHash: generated.sourceSnapshot.fileHash,
-				changeRequest: generated.changeRequest, tests: 'not run' };
+				changeRequest: generated.changeRequest, baseline: generated.baselineObservations ? 'captured' : 'not-run',
+				tests: generated.baselineObservations ? 'passed' : 'not run' };
 		} catch (error) {
 			metadata = { status: 'failed', reason: safeFailureReason(error,
 				'Report generation failed or report display was unavailable. No source was applied. Check root, saved target, provider, configuration and consent; review any created report before retrying.') };
@@ -67,7 +67,7 @@ function registerProposalReportTool(vscode, context, store) {
 	context.subscriptions.push(vscode.lm.registerTool(GENERATE_REPORT_TOOL, new GenerateProposalReportTool(vscode, store)));
 }
 
-function registerProposalReportCommand(vscode, context, store) {
+function registerProposalReportCommand(vscode, context, store, options = {}) {
 	context.subscriptions.push(vscode.commands.registerCommand(GENERATE_REPORT_COMMAND, async () => {
 		try {
 			const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => ({ label: folder.name ?? folder.uri.fsPath, folder }));
@@ -81,26 +81,21 @@ function registerProposalReportCommand(vscode, context, store) {
 			if (document.isDirty) throw new Error('The selected source file has unsaved changes. Report generation reads saved source only.');
 			const symbol = await vscode.window.showInputBox({ title: 'Exact function, method, or class name', ignoreFocusOut: true });
 			if (!symbol?.trim()) return { status: 'cancelled' };
-			const mode = await vscode.window.showQuickPick([
-				{ label: 'Mock (offline simulation)', mode: 'mock' },
-				{ label: 'Live (requires environment configuration and source-sharing consent)', mode: 'live' }
-			], { title: 'Proposal mode', placeHolder: 'Mock is the default; environment configuration never enables live mode.' });
-			if (!mode) return { status: 'cancelled' };
-			const changeRequest = mode.mode === 'live' ? await vscode.window.showInputBox({
+			const changeRequest = await vscode.window.showInputBox({
 				title: 'Requested refactor', prompt: 'Describe the improvement for this selected target.',
 				value: DEFAULT_REFACTOR_REQUEST, ignoreFocusOut: true,
 				validateInput: (value) => !value.trim() ? 'Enter a refactor request.' :
 					value.length > MAX_REFACTOR_REQUEST_LENGTH ? `Use at most ${MAX_REFACTOR_REQUEST_LENGTH} characters.` : undefined
-			}) : undefined;
-			if (mode.mode === 'live' && !changeRequest?.trim()) return { status: 'cancelled' };
+			});
+			if (!changeRequest?.trim()) return { status: 'cancelled' };
 			const reportDirectory = vscode.workspace.getConfiguration('legacyCodeTransformation', selected.folder.uri)
 				.get('reportDirectory', DEFAULT_REPORT_DIRECTORY);
 			const result = await vscode.window.withProgress({
 				location: vscode.ProgressLocation.Notification, title: 'Generating proposal report', cancellable: true
 			}, (progress, token) => generateProposalReport(vscode, {
 				projectRoot: selected.folder.uri.fsPath, targetFile: document.uri.fsPath,
-				targetSymbol: symbol.trim(), mode: mode.mode, reportDirectory, changeRequest
-			}, token));
+				targetSymbol: symbol.trim(), reportDirectory, changeRequest
+			}, token, options));
 			if (result.status === 'ready') {
 				result.proposalId = store ? await store.add(vscode, result) : null;
 				await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(result.reportPath)), { preview: false });

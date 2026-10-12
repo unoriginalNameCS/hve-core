@@ -65,7 +65,7 @@ test('report renderer includes only validated evidence and exact proposed text',
   assert.match(rendered, /No source files were changed or validated/);
 });
 
-test('report renderer shows local expectations for supplemental inputs before they run', () => {
+test('report renderer shows local expectations when supplemental inputs have not run', () => {
   const targetPath = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
   const candidate = proposal();
   candidate.target.path = targetPath;

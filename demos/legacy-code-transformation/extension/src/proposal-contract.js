@@ -239,12 +239,24 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
   }
 
   if (collectedContext?.sampleInputs?.length) {
+    const observedCases = collectedContext.baselineObservations?.baseline?.suggestedCases ?? [];
+    const baselineCaptured = observedCases.length === collectedContext.sampleInputs.length;
     lines.push('## Supplemental Sample Inputs', '',
-      'The live model suggested these bounded inputs. Expected results are calculated by the extension from the selected fixture rules; the model did not provide expected outputs. These cases have not run yet.', '');
+      baselineCaptured ?
+        'The extension generated these bounded inputs from the selected fixture function and its documented behavior. Expected results are calculated by extension-owned fixture rules. Observed outputs below come from running the original pinned fixture before any source change.' :
+        'The extension generated these bounded inputs from the selected fixture function and its documented behavior. Expected results are calculated by extension-owned fixture rules. These cases have not run yet.', '');
     for (const [index, sample] of collectedContext.sampleInputs.entries()) {
       lines.push(`### Sample ${index + 1}`, '',
         `Input: ${textFence(JSON.stringify(sample, null, 2))}`, '',
         `Expected by fixture rules: ${textFence(JSON.stringify(collectedContext.expectedSampleCase(expectedTarget, sample), null, 2))}`, '');
+      const observed = observedCases[index];
+      if (observed) {
+        lines.push(`Observed exit code: ${observed.exitCode}`, '',
+          `Observed stdout: ${textFence(observed.stdout)}`, '',
+          `Observed stderr: ${textFence(observed.stderr)}`, '');
+      } else {
+        lines.push('Observed output: not captured.', '');
+      }
     }
   }
 
@@ -258,8 +270,10 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
   if (collectedContext) {
     const discovery = collectedContext.discovery;
     lines.push('## Extension-Collected Context', '',
-      `Mode: ${collectedContext.mode === 'mock' ? 'SIMULATION (offline mock; no model request)' : 'Live model (unverified proposal)'}`, '',
-      'Observed baseline inputs/outputs: not run. Existing tests: not run. No equivalence claim.', '',
+      'Mode: Live Foundry model (unverified proposal)', '',
+      collectedContext.baselineObservations ?
+        'Observed baseline inputs/outputs: captured by running the original pinned fixture in a disposable copy. Existing fixture tests: passed. The proposed transformation has not been run; no equivalence claim.' :
+        'Observed baseline inputs/outputs: not captured for this proposal. Existing tests: not run. No equivalence claim.', '',
       'Helper extraction: unsupported outside the selected target span.', '',
       `Proposal SHA-256: ${codeSpan(collectedContext.proposalHash)}`, '',
       `Normalized target-span SHA-256 (not a full-file hash): ${codeSpan(collectedContext.targetSpanHash ?? 'unavailable')}`, '',

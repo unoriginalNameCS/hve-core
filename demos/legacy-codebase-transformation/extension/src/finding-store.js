@@ -29,9 +29,10 @@ class FindingStore {
   #scanId = null;
 
   addScan(result) {
-    this.#entries.clear();
+    if (this.#scanId !== result.scanId) this.#entries.clear();
     this.#scanId = result.scanId ?? null;
     for (const finding of result.findings ?? []) {
+      if (this.#entries.has(finding.id)) continue;
       const record = freezeRecord(structuredClone({ ...finding, rootPath: result.root }));
       this.#entries.set(record.id, { finding: record, status: 'new' });
     }
@@ -105,6 +106,42 @@ class FindingStore {
     }
     entry.status = 'approved';
     return { status: 'approved', finding: this.get(findingId) };
+  }
+
+  async dispose(vscode, approveIds = [], rejectIds = []) {
+    if (!Array.isArray(approveIds) || !Array.isArray(rejectIds) ||
+        [...approveIds, ...rejectIds].some((id) => typeof id !== 'string' || !id) ||
+        new Set([...approveIds, ...rejectIds]).size !== approveIds.length + rejectIds.length ||
+        approveIds.length + rejectIds.length === 0) {
+      return { status: 'rejected', reason: 'Provide non-empty, unique, disjoint finding ID lists.' };
+    }
+    const ids = [...approveIds, ...rejectIds];
+    if (ids.some((id) => !this.#entries.has(id))) {
+      return { status: 'rejected', reason: 'Every ID must belong to the current scan.' };
+    }
+    const findings = await Promise.all(ids.map((id) => this.refresh(vscode, id)));
+    const statuses = new Map(findings.map((finding) => [finding.id, finding.status]));
+    if (approveIds.some((id) => !['new', 'selected', 'approved'].includes(statuses.get(id))) ||
+        rejectIds.some((id) => !['new', 'selected', 'dismissed'].includes(statuses.get(id)))) {
+      return { status: 'rejected', reason: 'No decisions were applied; refresh and resolve stale or previously dispositioned findings.', findings };
+    }
+    for (const id of approveIds) {
+      if (statuses.get(id) !== 'approved') this.#entries.get(id).status = 'approved';
+    }
+    for (const id of rejectIds) {
+      if (statuses.get(id) !== 'dismissed') this.#entries.get(id).status = 'dismissed';
+    }
+    return {
+      status: 'completed',
+      approved: approveIds.map((id) => this.get(id)),
+      rejected: rejectIds.map((id) => this.get(id))
+    };
+  }
+
+  getCurrent(findingId) {
+    const entry = this.#entries.get(findingId);
+    if (!entry || !['new', 'selected', 'approved'].includes(entry.status)) return null;
+    return structuredClone(entry.finding);
   }
 
   getApproved(findingId) {

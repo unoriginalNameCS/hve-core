@@ -19,7 +19,7 @@ function uri(filePath) {
   return { scheme: 'file', authority: '', fsPath: filePath, path: filePath.split(path.sep).join('/') };
 }
 
-async function project(context, newline = '\n', bom = false) {
+async function project(context, newline = '\n', bom = false, captureRealBaseline = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-apply-'));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   for (const relativePath of fixturePaths) {
@@ -51,10 +51,35 @@ async function project(context, newline = '\n', bom = false) {
     },
     commands: { executeCommand: async (command) => command === 'vscode.executeDocumentSymbolProvider' ?
       [{ name: 'CalculateDiscountAmount', range, selectionRange: { start: range.start, end: range.start } }] : [] },
-    window: { showWarningMessage: async (message, options) => options.detail?.includes('Proposal ID:') ? APPLY_LABEL : 'Continue with C# providers' }
+    window: { showWarningMessage: async (message, options) => options.detail?.includes('Proposal ID:') ? APPLY_LABEL :
+      message.startsWith('Send this refactor request') ? 'Send collected context' : 'Continue with C# providers' }
   };
-  const result = await generateProposalReport(vscode, { projectRoot: canonicalRoot, targetFile, targetSymbol: 'CalculateDiscountAmount' }, undefined,
-    { roslynAnalyzer: async () => ({ mode: 'msbuild', semanticReferencesResolved: true, references: [], diagnostics: [] }) });
+  const result = await generateProposalReport(vscode, { projectRoot: canonicalRoot, targetFile, targetSymbol: 'CalculateDiscountAmount' }, undefined, {
+    env: { api_key: 'fake-test-credential', model: 'test-deployment', endpoint: 'https://test-resource.openai.azure.com' },
+    fetchImpl: async (_url, request) => {
+      const modelContext = JSON.parse(JSON.parse(request.body).messages[2].content);
+      const proposal = {
+        summary: 'Simplify the selected pizza calculation.',
+        target: { path: modelContext.target.path, symbol: modelContext.target.symbol },
+        evidence: modelContext.evidenceCatalog.map((item) => ({ id: item.id, path: item.path,
+          startLine: item.startLine, endLine: item.endLine, claim: 'This collected range supports the proposal.' })),
+        changes: [{ path: modelContext.target.path, originalText: modelContext.target.source.text,
+          replacementText: `public static decimal CalculateDiscountAmount(decimal subtotal, bool isMember)\n    {\n        return isMember || subtotal >= 50m ? subtotal * 0.10m : 0m;\n    }`,
+          rationale: 'Replace the nested conditions with one readable expression.' }],
+        unknowns: ['The model proposal is unverified until controlled fixture replay.']
+      };
+      return { ok: true, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop',
+        message: { content: JSON.stringify(proposal) } }] }) };
+    },
+    ...(!captureRealBaseline ? { baselineRunner: async (candidate) => ({
+      status: 'captured', fixtureHashes: {}, baseline: {
+        passed: true, tests: { exitCode: 0, stdout: 'Passed: 4', stderr: '' },
+        suggestedCases: candidate.sampleInputs.map((input) => ({ input, exitCode: 0,
+          stdout: `${require('../src/sample-inputs').expectedSampleCase(candidate.target, input)}${os.EOL}`, stderr: '' }))
+      }
+    }) } : {}),
+    roslynAnalyzer: async () => ({ mode: 'msbuild', semanticReferencesResolved: true, references: [], diagnostics: [] })
+  });
   let verificationCalls = 0;
   const store = new ProposalCandidateStore(async (candidate) => {
     verificationCalls += 1;
@@ -280,23 +305,23 @@ test('Node replay launches standalone node instead of the extension-host executa
   assert.equal(result.exitCode, 0);
 });
 
-test('real dotnet tests and four before/after inputs run on disposable copy, never original fixture', async (context) => {
+test('report captures original pizza outputs and apply compares against that baseline on a disposable copy', async (context) => {
   const original = await fs.readFile(path.join(fixtureRoot, TARGET_PATH));
-  const fixture = await project(context);
+  const fixture = await project(context, '\n', false, true);
+  assert.equal(fixture.result.baselineObservations.status, 'captured');
+  assert.equal(fixture.result.baselineObservations.transformed, null);
+  const proposalReport = await fs.readFile(fixture.result.reportPath, 'utf8');
+  assert.match(proposalReport, /Observed baseline inputs\/outputs: captured/);
+  assert.match(proposalReport, /Observed stdout:[\s\S]*2\.50/);
   fixture.result.mode = 'live';
-  fixture.result.sampleInputs = [
-    { subtotal: '40.00', isMember: true },
-    { subtotal: '60.00', isMember: false },
-    { subtotal: '49.90', isMember: false }
-  ];
   const result = await verifyPizzaProposal(fixture.result);
   assert.equal(result.status, 'passed', JSON.stringify(result));
   assert.equal(result.baseline.cases.length, 4);
   assert.equal(result.transformed.cases.length, 4);
-  assert.equal(result.baseline.suggestedCases.length, 3);
-  assert.equal(result.transformed.suggestedCases.length, 3);
+  assert.equal(result.baseline.suggestedCases.length, 4);
+  assert.equal(result.transformed.suggestedCases.length, 4);
   assert.deepEqual(result.baseline.suggestedCases.map((item) => [item.expectedOutput, item.passed]),
-    [['4.00', true], ['6.00', true], ['0.00', true]]);
+    [['2.50', true], ['0.00', true], ['5.00', true], ['5.01', true]]);
   assert.match(result.baseline.tests.stdout, /Passed:\s+4/);
   assert.match(result.transformed.tests.stdout, /Passed:\s+4/);
   assert.deepEqual(result.baseline.cases.map((item) => item.stdout.trim()), ['2.50', '0.00', '5.00', '7.50']);
@@ -304,7 +329,7 @@ test('real dotnet tests and four before/after inputs run on disposable copy, nev
   assert.deepEqual(await fs.readFile(path.join(fixtureRoot, TARGET_PATH)), original);
 });
 
-test('real Node baseline and alternate model replacement pass reset-state tests and process replay without changing fixture', async (context) => {
+test('real Node generation baseline is reused for transformed replay without changing fixture', async (context) => {
   const { NODE_HASHES, NODE_TARGET_PATH, NODE_BASELINE, NODE_REPLACEMENT } = require('../src/node-fixture');
   const { hashBytes } = require('../src/proposal-apply');
   const { verifyControlledProposal } = require('../src/fixture-replay');
@@ -331,6 +356,10 @@ test('real Node baseline and alternate model replacement pass reset-state tests 
   proposal: { changes: [{ replacementText: NODE_REPLACEMENT.replace(
     '\n  if (!Object.hasOwn(accounts, sourceId))', '\n\n  if (!Object.hasOwn(accounts, sourceId))') }] } };
   assert.notEqual(candidate.proposal.changes[0].replacementText, NODE_REPLACEMENT);
+  const { captureControlledBaseline } = require('../src/fixture-replay');
+  candidate.baselineObservations = await captureControlledBaseline(candidate);
+  assert.equal(candidate.baselineObservations.status, 'captured');
+  assert.equal(candidate.baselineObservations.transformed, null);
   const verification = await verifyControlledProposal(candidate);
   assert.equal(verification.status, 'passed', JSON.stringify(verification));
   assert.equal(verification.baseline.cases.length, 9);

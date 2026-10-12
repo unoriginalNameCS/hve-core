@@ -48,6 +48,11 @@ function controlledDefinition(candidate) {
   throw new Error('Apply disabled: controlled verification is configured only for one-span edits to the pinned pizza and Node targets.');
 }
 
+function isControlledTarget(target) {
+  return (target.path === TARGET_PATH && target.symbol === 'CalculateDiscountAmount') ||
+    (target.path === NODE_TARGET_PATH && target.symbol === 'transfer');
+}
+
 async function readControlledFixture(candidate) {
   const definition = controlledDefinition(candidate);
   const files = {};
@@ -136,6 +141,18 @@ function sameObservedCases(before, after) {
   });
 }
 
+function capturedBaseline(candidate, fixtureHashes) {
+  const captured = candidate.baselineObservations;
+  if (!captured) return null;
+  const expected = captured.fixtureHashes ?? {};
+  if (captured.status !== 'captured' || !captured.baseline?.passed ||
+      Object.keys(expected).length !== Object.keys(fixtureHashes).length ||
+      Object.entries(fixtureHashes).some(([relativePath, fingerprint]) => expected[relativePath] !== fingerprint)) {
+    throw new Error('Captured baseline does not match the current controlled fixture.');
+  }
+  return captured.baseline;
+}
+
 async function verifyPizzaProposal(candidate, token) {
   cancelled(token);
   if (controlledDefinition(candidate).kind !== 'pizza') throw new Error('Expected controlled pizza target.');
@@ -195,8 +212,12 @@ async function verifyPizzaProposal(candidate, token) {
         result.suggestedCases.every((item) => item.passed);
       return result;
     };
-    observations.baseline = await stage();
+    observations.baseline = capturedBaseline(candidate, fixtureHashes) ?? await stage();
     if (!observations.baseline.passed) throw new Error('Baseline tests or representative inputs failed.');
+    if (candidate.baselineOnly) {
+      observations.status = 'captured';
+      return observations;
+    }
     await fs.writeFile(path.join(directory, TARGET_PATH), replacementBytes(candidate));
     observations.transformed = await stage();
     if (!observations.transformed.passed || observations.baseline.tests.stderr !== observations.transformed.tests.stderr ||
@@ -277,8 +298,12 @@ async function verifyNodeProposal(candidate, token) {
       result.passed = result.cases.every((scenario) => scenario.passed) && result.suggestedCases.every((scenario) => scenario.passed);
       return result;
     };
-    observations.baseline = await stage();
+    observations.baseline = capturedBaseline(candidate, fixtureHashes) ?? await stage();
     if (!observations.baseline.passed) throw new Error('Baseline Node tests or reset-state replay failed.');
+    if (candidate.baselineOnly) {
+      observations.status = 'captured';
+      return observations;
+    }
     await fs.writeFile(path.join(directory, NODE_TARGET_PATH), replacementBytes(candidate));
     observations.transformed = await stage();
     if (!observations.transformed.passed || !sameObservedCases(observations.baseline.cases, observations.transformed.cases) ||
@@ -302,6 +327,16 @@ function verifyControlledProposal(candidate, token) {
   return controlledDefinition(candidate).kind === 'node' ? verifyNodeProposal(candidate, token) : verifyPizzaProposal(candidate, token);
 }
 
+async function captureControlledBaseline(candidate, token) {
+  const baselineCandidate = { ...candidate, baselineOnly: true };
+  const result = controlledDefinition(baselineCandidate).kind === 'node' ?
+    await verifyNodeProposal(baselineCandidate, token) : await verifyPizzaProposal(baselineCandidate, token);
+  if (result.status !== 'captured') {
+    throw new Error(`Could not capture controlled baseline: ${result.reason ?? 'baseline replay failed.'}`);
+  }
+  return result;
+}
+
 function renderVerificationReport(candidate, verification, application = { status: 'not-applied' }) {
   const applicationResult = application.status === 'applied' ?
     `Application: applied\n\nApplied source SHA-256: ${application.sourceHash}` :
@@ -315,4 +350,4 @@ function renderVerificationReport(candidate, verification, application = { statu
 }
 
 module.exports = { TARGET_PATH, PIZZA_CASES, readControlledFixture, assertFixtureHashes, runDotnet, runNode,
-  verifyPizzaProposal, verifyNodeProposal, verifyControlledProposal, renderVerificationReport };
+  verifyPizzaProposal, verifyNodeProposal, verifyControlledProposal, isControlledTarget, captureControlledBaseline, renderVerificationReport };

@@ -6,9 +6,6 @@ const { createHash, randomUUID } = require('node:crypto');
 const { isPathWithinRoot, resolveWorkspaceRoot } = require('./workspace-scope');
 const { hashSource } = require('./workspace-scan');
 
-const PROPOSAL_CONSENT = 'Send context and draft proposal';
-const APPLY_CONSENT = 'Apply this exact replacement';
-
 function contentHash(value) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -149,7 +146,7 @@ class ProposalStore {
   }
 }
 
-async function generateProposal(vscode, findingStore, proposalStore, findingId, model, changeRequest, token, options = {}) {
+async function prepareProposalRequest(vscode, findingStore, findingId, model, changeRequest) {
   const finding = findingStore.getApproved(findingId);
   if (!finding) return { status: 'rejected', reason: 'Only a current finding with explicit finding approval can be proposed.' };
   if (!model || typeof model.sendRequest !== 'function') throw new Error('Select an available language model before proposing.');
@@ -174,15 +171,31 @@ async function generateProposal(vscode, findingStore, proposalStore, findingId, 
     context
   });
   if (Buffer.byteLength(prompt, 'utf8') > 256 * 1024) throw new Error('Proposal context exceeds the 256 KB request limit.');
-  if (typeof vscode.window?.showWarningMessage !== 'function') throw new Error('Per-proposal source-sharing confirmation is unavailable.');
-  const modelName = model.name ?? model.family ?? model.id ?? 'selected model';
-  const destination = `${model.vendor ?? 'unknown vendor'}${model.id ? ` / ${model.id}` : ''}`;
-  const permission = await vscode.window.showWarningMessage(
-    'Send the selected finding and recollected source context to draft a proposal?',
-    { modal: true, detail: `Finding: ${finding.id}\nFile: ${finding.path}\nRequested refactor: ${request}\nModel: ${modelName}\nDestination: ${destination}\nSource SHA-256: ${sourceSnapshot.fileHash}\n\nRecollected source context:\n${sourceSnapshot.sourceContext}\n\nThis approval permits proposal drafting only. A separate exact-diff confirmation is required before any write.` },
-    PROPOSAL_CONSENT
-  );
-  if (permission !== PROPOSAL_CONSENT || token?.isCancellationRequested) return { status: 'cancelled' };
+  const fingerprint = contentHash(JSON.stringify({
+    findingId, request, vendor: model.vendor ?? null, modelId: model.id ?? null,
+    rootPath: sourceSnapshot.rootPath, path: sourceSnapshot.path, fileHash: sourceSnapshot.fileHash,
+    sourceHash: sourceSnapshot.sourceHash, version: sourceSnapshot.version, sourceContext: sourceSnapshot.sourceContext
+  }));
+  return {
+    status: 'ready', finding, request, sourceSnapshot, prompt, fingerprint,
+    preview: {
+      findingId, path: finding.path, symbol: finding.symbol, range: finding.range,
+      requestedRefactor: request, sourceHash: sourceSnapshot.fileHash,
+      contextRange: { startLine: sourceSnapshot.contextStartLine, endLine: sourceSnapshot.contextEndLine },
+      contextBytes: Buffer.byteLength(sourceSnapshot.sourceContext, 'utf8'),
+      contextHash: contentHash(sourceSnapshot.sourceContext)
+    }
+  };
+}
+
+async function generateProposal(vscode, findingStore, proposalStore, findingId, model, changeRequest, token, options = {}) {
+  const prepared = await prepareProposalRequest(vscode, findingStore, findingId, model, changeRequest);
+  if (prepared.status !== 'ready') return prepared;
+  if (options.chatApproved !== true || token?.isCancellationRequested) return { status: 'cancelled', requests: 0 };
+  if (options.expectedFingerprint && options.expectedFingerprint !== prepared.fingerprint) {
+    return { status: 'stale', reason: 'The finding or source context changed after the chat preview. Prepare a new proposal.' };
+  }
+  const { finding, request, sourceSnapshot, prompt } = prepared;
 
   let text;
   if (options.requestModel) {
@@ -231,17 +244,54 @@ function proposalIntegrity(candidate) {
 }
 
 function sameSnapshot(left, right) {
-  return left.rootPath === right.rootPath && left.fileHash === right.fileHash &&
+  return left.rootPath === right.rootPath && left.path === right.path && left.bytes === right.bytes && left.fileHash === right.fileHash &&
     left.sourceHash === right.sourceHash && left.version === right.version && left.text === right.text;
 }
 
-async function applyProposal(vscode, findingStore, proposalStore, proposalId, token) {
+function currentProposal(findingStore, proposalStore, proposalId) {
+  const candidate = proposalStore.get(proposalId);
+  if (!candidate || candidate.status !== 'pending' || !proposalIntegrity(candidate)) return null;
+  const approvedFinding = candidate.origin === 'scan' ? findingStore.getCurrent(candidate.finding.id) :
+    findingStore.getApproved(candidate.finding.id);
+  return approvedFinding && JSON.stringify(approvedFinding) === JSON.stringify(candidate.finding) ? candidate : null;
+}
+
+async function prepareApplyFindings(vscode, findingStore, proposalStore, findingIds) {
+  if (!Array.isArray(findingIds) || findingIds.length < 1 || findingIds.length > 30 ||
+      findingIds.some((id) => typeof id !== 'string' || !id.trim()) || new Set(findingIds).size !== findingIds.length) {
+    return { status: 'rejected', sourceWritten: false, reason: 'Provide between 1 and 30 unique current finding IDs.' };
+  }
+  const candidates = [];
+  for (const findingId of findingIds) {
+    if (!findingStore.getCurrent(findingId)) {
+      return { status: 'rejected', sourceWritten: false, reason: 'Every finding must be current and not dismissed.' };
+    }
+    await findingStore.refresh(vscode, findingId);
+    const finding = findingStore.getCurrent(findingId);
+    if (!finding) return { status: 'stale', sourceWritten: false, reason: 'The finding source changed. Run a fresh scan.' };
+    const sourceSnapshot = await captureSourceSnapshot(vscode, finding);
+    const proposal = validateProposalResponse({
+      summary: 'Apply the existing scan suggestion.', replacementText: finding.replacementText,
+      rationale: finding.rationale, unknowns: ['Behavior has not been verified; project tests were not run.']
+    }, finding);
+    const candidate = { origin: 'scan', finding, proposal, sourceSnapshot,
+      proposalHash: contentHash(JSON.stringify(proposal)) };
+    candidate.report = renderProposalReport(candidate);
+    candidate.reportHash = contentHash(Buffer.from(candidate.report, 'utf8'));
+    candidates.push(candidate);
+  }
+  const proposalIds = candidates.map((candidate) => proposalStore.add(candidate));
+  const prepared = await prepareApplyProposalBatch(vscode, findingStore, proposalStore, proposalIds);
+  if (prepared.status !== 'ready') proposalIds.forEach((id) => proposalStore.setStatus(id, 'rejected'));
+  return prepared;
+}
+
+async function prepareApplyCandidate(vscode, findingStore, proposalStore, proposalId, openedEditor) {
   const candidate = proposalStore.get(proposalId);
   if (!candidate || candidate.status !== 'pending' || !proposalIntegrity(candidate)) {
     return { status: 'rejected', reason: 'The proposal is missing, no longer pending, or its exact diff/report integrity check failed.' };
   }
-  const approvedFinding = findingStore.getApproved(candidate.finding.id);
-  if (!approvedFinding || approvedFinding.sourceHash !== candidate.finding.sourceHash) {
+  if (!currentProposal(findingStore, proposalStore, proposalId)) {
     return { status: 'stale', reason: 'The originating finding is no longer approved. Rescan and draft a new proposal.' };
   }
   let before;
@@ -251,19 +301,46 @@ async function applyProposal(vscode, findingStore, proposalStore, proposalId, to
     proposalStore.setStatus(proposalId, 'stale');
     return { status: 'stale', reason: 'The workspace, source, or editor state changed. Rescan and draft a new proposal.' };
   }
-  if (!sameSnapshot(before, candidate.sourceSnapshot)) {
+  const comparable = candidate.sourceSnapshot.version === null && before.version === openedEditor?.version
+    ? { ...before, version: null } : before;
+  if (!sameSnapshot(comparable, candidate.sourceSnapshot)) {
     proposalStore.setStatus(proposalId, 'stale');
     return { status: 'stale', reason: 'The workspace, source, or editor version changed. Rescan and draft a new proposal.' };
   }
-  if (typeof vscode.window?.showWarningMessage !== 'function') {
-    throw new Error('Exact-diff approval UI is unavailable.');
+  const fingerprint = contentHash(JSON.stringify({
+    proposalId, findingId: candidate.finding.id, path: candidate.finding.path,
+    sourceHash: before.fileHash, proposalHash: candidate.proposalHash, reportHash: candidate.reportHash,
+    version: before.version, originalText: candidate.finding.originalText,
+    replacementText: candidate.proposal.replacementText
+  }));
+  return {
+    status: 'ready', fingerprint,
+    preview: {
+      proposalId, findingId: candidate.finding.id, path: candidate.finding.path,
+      symbol: candidate.finding.symbol, range: candidate.finding.range,
+      sourceHash: before.fileHash, proposalHash: candidate.proposalHash, reportHash: candidate.reportHash,
+      originalText: candidate.finding.originalText, replacementText: candidate.proposal.replacementText,
+      tests: 'not run'
+    }
+  };
+}
+
+async function prepareApplyProposal(vscode, findingStore, proposalStore, proposalId) {
+  return prepareApplyCandidate(vscode, findingStore, proposalStore, proposalId);
+}
+
+async function applyProposal(vscode, findingStore, proposalStore, proposalId, token, options = {}) {
+  if (options.chatApproved !== true || token?.isCancellationRequested) return { status: 'cancelled', sourceWritten: false };
+  const prepared = await prepareApplyProposal(vscode, findingStore, proposalStore, proposalId);
+  if (prepared.status !== 'ready') return prepared;
+  if (options.expectedFingerprint && options.expectedFingerprint !== prepared.fingerprint) {
+    return { status: 'stale', reason: 'The proposal or source changed after the chat preview. Prepare a new apply preview.' };
   }
-  const permission = await vscode.window.showWarningMessage(
-    'Apply only this exact replacement to the selected source span?',
-    { modal: true, detail: `File: ${candidate.finding.path}\nSymbol: ${candidate.finding.symbol}\nSource SHA-256: ${before.fileHash}\nProposal SHA-256: ${candidate.proposalHash}\nReport SHA-256: ${candidate.reportHash}\n\nExact original:\n${codeFence(candidate.finding.originalText)}\n\nExact replacement:\n${codeFence(candidate.proposal.replacementText)}\n\nNo other files or spans will be changed. Project tests and commands will not be run.` },
-    APPLY_CONSENT
-  );
-  if (permission !== APPLY_CONSENT || token?.isCancellationRequested) return { status: 'cancelled' };
+  const candidate = proposalStore.get(proposalId);
+  if (!candidate || candidate.status !== 'pending' || !proposalIntegrity(candidate)) {
+    return { status: 'rejected', reason: 'The proposal changed after the chat preview.' };
+  }
+  const before = candidate.sourceSnapshot;
 
   const currentCandidate = proposalStore.get(proposalId);
   if (!currentCandidate || currentCandidate.status !== 'pending' || !proposalIntegrity(currentCandidate) ||
@@ -310,7 +387,16 @@ async function applyProposal(vscode, findingStore, proposalStore, proposalId, to
   const originalSuffix = originalBytes.subarray(suffixStart);
   if (writtenText !== expectedText || !writtenBytes.subarray(0, originalPrefix.length).equals(originalPrefix) ||
       !writtenBytes.subarray(writtenBytes.length - originalSuffix.length).equals(originalSuffix)) {
-    return { status: 'failed', reason: 'The saved file did not match the approved exact-span replacement.' };
+    const sourceWritten = !writtenBytes.equals(originalBytes);
+    if (sourceWritten) proposalStore.setStatus(proposalId, 'verification-failed');
+    return {
+      status: 'verification-failed', proposalId, findingId: candidate.finding.id,
+      path: candidate.finding.path, application: sourceWritten ? 'saved-but-unverified' : 'not-applied',
+      sourceWritten, resultingSourceHash: contentHash(writtenBytes), tests: 'not run',
+      message: sourceWritten
+        ? 'The file was saved, but persisted content did not match the approved exact-span replacement. Do not retry this proposal; inspect the current file.'
+        : 'The saved file did not match the approved exact-span replacement, and its bytes remain unchanged.'
+    };
   }
   proposalStore.setStatus(proposalId, 'applied');
   return {
@@ -321,14 +407,161 @@ async function applyProposal(vscode, findingStore, proposalStore, proposalId, to
   };
 }
 
+async function prepareApplyBatch(vscode, findingStore, proposalStore, proposalIds, openedEditor) {
+  if (!Array.isArray(proposalIds) || proposalIds.length === 0 || proposalIds.length > 30 ||
+      proposalIds.some((id) => typeof id !== 'string' || !id.trim()) || new Set(proposalIds).size !== proposalIds.length) {
+    return { status: 'rejected', sourceWritten: false, reason: 'Provide between 1 and 30 unique proposal IDs.' };
+  }
+  const candidates = [];
+  for (const proposalId of [...proposalIds].sort()) {
+    const prepared = await prepareApplyCandidate(vscode, findingStore, proposalStore, proposalId, openedEditor);
+    if (prepared.status !== 'ready') return { ...prepared, sourceWritten: false };
+    const candidate = currentProposal(findingStore, proposalStore, proposalId);
+    if (!candidate) return { status: 'rejected', sourceWritten: false, reason: 'A proposal or finding changed during preparation.' };
+    candidates.push(candidate);
+  }
+  const snapshot = candidates[0].sourceSnapshot;
+  if (candidates.some((candidate) => !sameSnapshot(snapshot, candidate.sourceSnapshot))) {
+    return { status: 'rejected', sourceWritten: false, reason: 'Every proposal must use the same root, file, and source snapshot.' };
+  }
+  const spans = candidates.map((candidate) => ({ candidate, offsets: spanOffsets(snapshot.text, candidate.finding.range) }));
+  if (spans.some(({ candidate, offsets }) => !offsets ||
+      snapshot.text.slice(offsets.start, offsets.end) !== candidate.finding.originalText)) {
+    return { status: 'rejected', sourceWritten: false, reason: 'A proposal span does not match the original snapshot.' };
+  }
+  spans.sort((left, right) => left.offsets.start - right.offsets.start);
+  if (spans.some((span, index) => index > 0 && span.offsets.start < spans[index - 1].offsets.end)) {
+    return { status: 'rejected', sourceWritten: false, reason: 'Proposal spans overlap.' };
+  }
+  const fingerprint = contentHash(JSON.stringify(candidates));
+  const currentCandidates = candidates.map((candidate) => currentProposal(findingStore, proposalStore, candidate.id));
+  if (currentCandidates.some((candidate) => !candidate) || contentHash(JSON.stringify(currentCandidates)) !== fingerprint) {
+    return { status: 'rejected', sourceWritten: false, reason: 'The proposals or findings changed during preparation.' };
+  }
+  return {
+    status: 'ready', fingerprint,
+    preview: {
+      proposalIds: candidates.map((candidate) => candidate.id), path: snapshot.path, sourceHash: snapshot.fileHash,
+      changes: spans.map(({ candidate }) => ({
+        proposalId: candidate.id, findingId: candidate.finding.id, range: candidate.finding.range,
+        originalText: candidate.finding.originalText, replacementText: candidate.proposal.replacementText,
+        proposalHash: candidate.proposalHash, reportHash: candidate.reportHash
+      })),
+      tests: 'not run'
+    }
+  };
+}
+
+async function prepareApplyProposalBatch(vscode, findingStore, proposalStore, proposalIds) {
+  return prepareApplyBatch(vscode, findingStore, proposalStore, proposalIds);
+}
+
+async function applyProposalBatch(vscode, findingStore, proposalStore, proposalIds, token, options = {}) {
+  if (options.chatApproved !== true || token?.isCancellationRequested) return { status: 'cancelled', sourceWritten: false };
+  const prepared = await prepareApplyProposalBatch(vscode, findingStore, proposalStore, proposalIds);
+  if (prepared.status !== 'ready') return prepared;
+  if (options.expectedFingerprint !== prepared.fingerprint) {
+    return { status: 'stale', sourceWritten: false, reason: 'Review and approve the current exact batch fingerprint.' };
+  }
+  const ids = prepared.preview.proposalIds;
+  const candidates = ids.map((id) => currentProposal(findingStore, proposalStore, id));
+  if (candidates.some((candidate) => !candidate) || contentHash(JSON.stringify(candidates)) !== prepared.fingerprint) {
+    return { status: 'rejected', sourceWritten: false, reason: 'The proposals or findings changed after approval.' };
+  }
+  const snapshot = candidates[0].sourceSnapshot;
+  let sourcePath;
+  let document;
+  let current;
+  let openedEditor;
+  try {
+    sourcePath = await safeSourcePath(snapshot.rootPath, snapshot.path);
+    document = await vscode.workspace.openTextDocument(vscode.Uri.file(sourcePath));
+    openedEditor = { version: document.version };
+    const revalidated = await prepareApplyBatch(vscode, findingStore, proposalStore, ids, openedEditor);
+    if (revalidated.status !== 'ready') return revalidated;
+    if (revalidated.fingerprint !== prepared.fingerprint) {
+      return { status: 'stale', sourceWritten: false, reason: 'The batch changed while opening the editor.' };
+    }
+    current = await captureSourceSnapshot(vscode, candidates[0].finding);
+  } catch {
+    return { status: 'stale', sourceWritten: false, reason: 'The source or editor state changed after approval.' };
+  }
+  const finalCandidates = ids.map((id) => currentProposal(findingStore, proposalStore, id));
+  const comparable = snapshot.version === null && current.version === openedEditor.version ? { ...current, version: null } : current;
+  if (finalCandidates.some((candidate) => !candidate) || contentHash(JSON.stringify(finalCandidates)) !== prepared.fingerprint ||
+      !sameSnapshot(comparable, snapshot) || document.isDirty || document.getText() !== current.text ||
+      document.version !== openedEditor.version || (current.version !== null && document.version !== current.version)) {
+    return { status: 'stale', sourceWritten: false, reason: 'The exact candidates, source, or editor buffer changed after approval.' };
+  }
+  if (token?.isCancellationRequested) return { status: 'cancelled', sourceWritten: false };
+  const originalBytes = Buffer.from(current.bytes, 'base64');
+  const bomLength = originalBytes.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? 3 : 0;
+  const parts = [];
+  let previousEnd = 0;
+  const edit = new vscode.WorkspaceEdit();
+  const spans = prepared.preview.changes.map((change) => ({ change, offsets: spanOffsets(current.text, change.range) }));
+  for (const { change, offsets } of spans) {
+    const startByte = bomLength + Buffer.byteLength(current.text.slice(0, offsets.start), 'utf8');
+    const endByte = bomLength + Buffer.byteLength(current.text.slice(0, offsets.end), 'utf8');
+    parts.push(originalBytes.subarray(previousEnd, startByte), Buffer.from(change.replacementText, 'utf8'));
+    previousEnd = endByte;
+  }
+  parts.push(originalBytes.subarray(previousEnd));
+  const expectedBytes = Buffer.concat(parts);
+  for (const { change, offsets } of [...spans].reverse()) {
+    edit.replace(document.uri, new vscode.Range(document.positionAt(offsets.start), document.positionAt(offsets.end)), change.replacementText);
+  }
+  ids.forEach((id) => proposalStore.setStatus(id, 'applying'));
+  let accepted;
+  try {
+    accepted = await vscode.workspace.applyEdit(edit);
+  } catch {
+    ids.forEach((id) => proposalStore.setStatus(id, 'verification-failed'));
+    return { status: 'verification-failed', proposalIds: ids, path: snapshot.path, sourceWritten: null,
+      resultingSourceHash: null, tests: 'not run', reason: 'The editor edit failed unexpectedly. Inspect the file; do not retry this batch.' };
+  }
+  if (!accepted) {
+    ids.forEach((id) => proposalStore.setStatus(id, 'pending'));
+    return { status: 'failed', sourceWritten: false, reason: 'VS Code rejected the exact batch edit.' };
+  }
+  ids.forEach((id) => proposalStore.setStatus(id, 'verification-failed'));
+  let saved = false;
+  try {
+    saved = await document.save();
+  } catch {
+    saved = false;
+  }
+  let writtenBytes;
+  try {
+    writtenBytes = await fs.readFile(sourcePath);
+  } catch {
+    return { status: 'verification-failed', proposalIds: ids, path: snapshot.path, sourceWritten: null,
+      resultingSourceHash: null, tests: 'not run', reason: 'Persisted source could not be read. Inspect the file; do not retry this batch.' };
+  }
+  const sourceWritten = !writtenBytes.equals(originalBytes);
+  const verified = saved && writtenBytes.equals(expectedBytes);
+  if (verified) ids.forEach((id) => proposalStore.setStatus(id, 'applied'));
+  if (sourceWritten) await findingStore.refresh(vscode);
+  return {
+    status: verified ? 'applied' : 'verification-failed', proposalIds: ids, path: snapshot.path,
+    sourceHash: snapshot.fileHash, sourceWritten, resultingSourceHash: contentHash(writtenBytes), tests: 'not run',
+    application: verified ? 'applied' : sourceWritten ? 'saved-but-unverified' : 'not-applied',
+    message: verified ? 'Only the approved source spans were replaced and saved. No project tests or commands were run.' :
+      'The persisted file did not verify as the approved exact batch. All candidates are consumed; inspect the file before drafting new proposals.'
+  };
+}
+
 module.exports = {
-  APPLY_CONSENT,
-  PROPOSAL_CONSENT,
   ProposalStore,
   applyProposal,
+  applyProposalBatch,
   captureSourceSnapshot,
   contentHash,
   generateProposal,
+  prepareApplyProposal,
+  prepareApplyProposalBatch,
+  prepareApplyFindings,
+  prepareProposalRequest,
   renderProposalReport,
   safeSourcePath,
   spanOffsets,

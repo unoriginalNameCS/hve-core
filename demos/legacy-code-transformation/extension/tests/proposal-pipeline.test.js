@@ -7,7 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { generateModelProposal, validateEndpoint } = require('../src/foundry-adapter');
 const { generateProposalReport, writeProposalReport } = require('../src/proposal-report');
-const { expectedSampleCase, selectSampleInputs } = require('../src/sample-inputs');
+const { expectedSampleCase, generateSampleInputs, validateSampleInputs } = require('../src/sample-inputs');
 
 const modelContext = {
   target: { path: 'Target.js', symbol: 'calculate', source: null },
@@ -16,23 +16,38 @@ const modelContext = {
 const fakeEnv = { api_key: 'fake-test-credential', model: 'test-deployment', endpoint: 'https://test-resource.openai.azure.com' };
 
 function liveOptions(fetchImpl, consent = 'Send collected context') {
-  return { mode: 'live', changeRequest: 'Simplify nested conditionals while preserving behavior.', env: fakeEnv, fetchImpl,
+  return { changeRequest: 'Simplify nested conditionals while preserving behavior.', env: fakeEnv, fetchImpl,
     vscode: { window: { showWarningMessage: async () => consent } } };
 }
 
+function proposalFor(context, changes = []) {
+  return {
+    summary: 'Proposal based on collected source evidence.',
+    target: { path: context.target.path, symbol: context.target.symbol },
+    evidence: (context.evidenceCatalog ?? []).map((item) => ({
+      id: item.id, path: item.path, startLine: item.startLine, endLine: item.endLine,
+      claim: 'This source range supports review of the selected target.'
+    })),
+    changes,
+    unknowns: ['Runtime behavior remains unverified until the controlled verification step.']
+  };
+}
+
 function response(proposal, overrides = {}) {
-  const payload = { ...proposal, pizzaCases: proposal.pizzaCases ?? [], nodeCases: proposal.nodeCases ?? [] };
+  const payload = proposal;
   return { ok: true, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(payload) }, ...overrides }] }) };
 }
 
-test('mock ignores configured environment and transport entirely', async () => {
-  const result = await generateModelProposal(modelContext, {
-    env: new Proxy(fakeEnv, { get() { throw new Error('Environment must not be read.'); } }),
-    fetchImpl() { throw new Error('Transport must not run.'); }
-  });
-  assert.equal(result.mode, 'mock');
-  assert.match(result.proposal.summary, /SIMULATION/);
-  assert.deepEqual(result.proposal.changes, []);
+function fakeFoundry(proposalFactory = proposalFor) {
+  return async (url, request) => {
+    const context = JSON.parse(JSON.parse(request.body).messages[2].content);
+    return response(proposalFactory(context));
+  };
+}
+
+test('proposal generation always requires configured Live Foundry and cannot fall back to mock', async () => {
+  await assert.rejects(generateModelProposal(modelContext, { env: {} }), /requires api_key/);
+  await assert.rejects(generateModelProposal(modelContext, { mode: 'mock', env: {} }), /requires api_key/);
 });
 
 test('live fake transport uses documented v1 auth and strict schema after exact context confirmation', async () => {
@@ -45,11 +60,12 @@ test('live fake transport uses documented v1 auth and strict schema after exact 
     assert.equal(body.model, fakeEnv.model);
     assert.equal(body.messages[1].content, `Requested refactor: ${options.changeRequest}`);
     assert.equal(body.messages[2].content, JSON.stringify(modelContext));
-    assert.match(body.messages[0].content, /0\.10 increments/);
-    assert.match(body.messages[0].content, /"49\.90", "50\.00", and "50\.10"/);
+    assert.doesNotMatch(body.messages[0].content, /pizzaCases|nodeCases/i);
     assert.equal(body.response_format.json_schema.strict, true);
+    assert.equal(body.response_format.json_schema.schema.properties.pizzaCases, undefined);
+    assert.equal(body.response_format.json_schema.schema.properties.nodeCases, undefined);
     assert.equal(body.response_format.json_schema.schema.properties.evidence.items.properties.startLine.minimum, undefined);
-    return response((await generateModelProposal(modelContext)).proposal);
+    return response(proposalFor(modelContext));
   });
   options.vscode.window.showWarningMessage = async (message, modal) => {
     assert.equal(modal.modal, true);
@@ -64,50 +80,45 @@ test('live fake transport uses documented v1 auth and strict schema after exact 
   assert.equal(result.changeRequest, options.changeRequest);
 });
 
-test('live output carries only bounded Node inputs and leaves expected results to the extension', async () => {
+test('live output generates Node inputs locally and leaves expected results to the extension', async () => {
   const context = { ...modelContext, target: { path: 'src/transfer.js', symbol: 'transfer', source: null } };
-  const proposal = (await generateModelProposal(context)).proposal;
-  const nodeCases = [
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 0 },
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 1 }
-  ];
+  const proposal = proposalFor(context);
   const options = liveOptions(async (url, request) => {
     const schema = JSON.parse(request.body).response_format.json_schema.schema;
-    assert.ok(schema.required.includes('nodeCases'));
-    assert.ok(schema.required.includes('pizzaCases'));
-    assert.equal(schema.properties.nodeCases.items.properties.expected, undefined);
-    return response({ ...proposal, pizzaCases: [], nodeCases });
+    assert.equal(schema.properties.nodeCases, undefined);
+    assert.equal(schema.properties.pizzaCases, undefined);
+    return response(proposal);
   });
   const result = await generateModelProposal(context, options);
+  const nodeCases = generateSampleInputs(context.target);
   assert.deepEqual(result.sampleInputs, nodeCases);
-  assert.equal(result.proposal.nodeCases, undefined);
+  assert.deepEqual(result.proposal, proposal);
+  assert.deepEqual(nodeCases.map((sample) => expectedSampleCase(context.target, sample).result.reason),
+    [null, 'source missing', 'destination missing', 'accounts must differ', 'insufficient funds']);
   assert.deepEqual(expectedSampleCase(context.target, nodeCases[0]), {
     result: { accepted: true, reason: null }, balances: { alice: 75, bob: 75 }
   });
 });
 
-test('sample inputs reject unsafe shapes, out-of-range values and non-target cases', () => {
-  const target = { path: 'src/transfer.js', symbol: 'transfer' };
-  const valid = { accounts: [{ id: 'alice', balance: 100 }], sourceId: 'alice', destinationId: 'bob', amount: 1 };
-  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [valid] }, target), /three to five/);
-  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [valid, valid, valid] }, target), /valid, unique cases/);
-  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [
-    valid, valid, { ...valid, accounts: [{ id: '__proto__', balance: 1 }] }
-  ] }, target), /valid, unique cases/);
-  assert.throws(() => selectSampleInputs({ pizzaCases: [], nodeCases: [] }, target), /three to five/);
-  assert.equal(expectedSampleCase({ path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' },
-    { subtotal: '50.10', isMember: false }), '5.01');
-});
+test('fixture sample inputs are locally generated from function behavior and validated', () => {
+  const pizzaTarget = { path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' };
+  const pizzaCases = generateSampleInputs(pizzaTarget);
+  assert.equal(pizzaCases.length, 4);
+  assert.deepEqual(pizzaCases.map((sample) => expectedSampleCase(pizzaTarget, sample)), ['2.50', '0.00', '5.00', '5.01']);
 
-test('pizza sample inputs accept the documented maximum subtotal', () => {
-  const target = { path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' };
-  const cases = [
-    { subtotal: '1000000.00', isMember: false },
-    { subtotal: '49.90', isMember: false },
-    { subtotal: '50.00', isMember: false }
-  ];
-  assert.deepEqual(selectSampleInputs({ pizzaCases: cases, nodeCases: [] }, target), cases);
+  const nodeTarget = { path: 'src/transfer.js', symbol: 'transfer' };
+  const nodeCases = generateSampleInputs(nodeTarget);
+  assert.equal(nodeCases.length, 5);
+  assert.deepEqual(validateSampleInputs(nodeCases, nodeTarget, true), nodeCases);
+  assert.equal(new Set(nodeCases.map((sample) => JSON.stringify(sample))).size, nodeCases.length);
+  assert.deepEqual(generateSampleInputs({ path: 'Target.js', symbol: 'calculate' }), []);
+
+  const valid = { accounts: [{ id: 'alice', balance: 100 }], sourceId: 'alice', destinationId: 'bob', amount: 1 };
+  assert.throws(() => validateSampleInputs([valid], nodeTarget, true), /three to five/);
+  assert.throws(() => validateSampleInputs([valid, valid, valid], nodeTarget, true), /valid, unique cases/);
+  assert.throws(() => validateSampleInputs([
+    valid, valid, { ...valid, accounts: [{ id: '__proto__', balance: 1 }] }
+  ], nodeTarget, true), /valid, unique cases/);
 });
 
 test('live cancelled permission or missing modal never calls transport', async () => {
@@ -128,7 +139,6 @@ test('endpoint/config validation rejects arbitrary hosts, project endpoints, cre
   }
   assert.equal(validateEndpoint('https://test.services.ai.azure.com/openai/v1/'), 'https://test.services.ai.azure.com/openai/v1/chat/completions');
   await assert.rejects(generateModelProposal(modelContext, { ...liveOptions(), env: {} }), /requires api_key/);
-  await assert.rejects(generateModelProposal(modelContext, { mode: 'automatic' }), /explicitly/);
 });
 
 test('Live failures expose only safe stage diagnostics and never response credentials', async () => {
@@ -152,22 +162,12 @@ test('Live failures expose only safe stage diagnostics and never response creden
   }
 });
 
-test('Live response reports local pizza sample validation without echoing sample content', async () => {
+test('Live pizza generation includes extension-owned threshold and membership cases', async () => {
   const context = { ...modelContext, target: { path: 'src/PizzaEligibility/PizzaDiscountCalculator.cs', symbol: 'CalculateDiscountAmount' } };
-  const proposal = (await generateModelProposal(context)).proposal;
-  const invalidPizzaCases = [
-    { subtotal: '12.34', isMember: false },
-    { subtotal: '20.00', isMember: true },
-    { subtotal: '50.00', isMember: false }
-  ];
-  await assert.rejects(generateModelProposal(context, liveOptions(async () =>
-    response({ ...proposal, pizzaCases: invalidPizzaCases, nodeCases: [] }))), (error) => {
-    assert.equal(error.code, 'FOUNDRY_DIAGNOSTIC');
-    assert.match(error.message, /sample inputs failed local validation/);
-    assert.match(error.message, /subtotal was not a multiple of \$0\.10/);
-    assert.ok(!error.message.includes('12.34'));
-    return true;
-  });
+  const proposal = proposalFor(context);
+  const result = await generateModelProposal(context, liveOptions(async () => response(proposal)));
+  assert.deepEqual(result.sampleInputs, generateSampleInputs(context.target));
+  assert.deepEqual(result.sampleInputs.map((sample) => sample.subtotal), ['25.00', '49.90', '50.00', '50.10']);
 });
 
 test('finite timeout aborts a hung transport without fallback success', async () => {
@@ -206,20 +206,22 @@ async function project(context) {
   return { root, vscode, source, input: { projectRoot: root, targetFile: targetUri.fsPath, targetSymbol: 'calculate' } };
 }
 
-test('pipeline rediscovers and reads source, test/docs context and writes only a simulation report', async (context) => {
+test('pipeline rediscovers and reads source and writes a Live report from Foundry output', async (context) => {
   const fixture = await project(context);
-  const result = await generateProposalReport(fixture.vscode, { ...fixture.input, evidenceCatalog: [{ id: 'forged' }] }, undefined, {
-    env: new Proxy(fakeEnv, { get() { throw new Error('Do not read configured environment.'); } }),
-    fetchImpl() { throw new Error('No network.'); }
-  });
+  const result = await generateProposalReport(fixture.vscode,
+    { ...fixture.input, evidenceCatalog: [{ id: 'forged' }] }, undefined,
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   assert.equal(result.status, 'ready');
   assert.ok(result.reportPath.endsWith('.md'));
   assert.ok(result.evidenceCatalog.some((item) => item.kind === 'test context'));
   assert.ok(result.evidenceCatalog.some((item) => item.kind === 'documentation context'));
   assert.ok(result.evidenceCatalog.every((item) => item.id !== 'forged'));
+  assert.equal(result.baselineObservations, null);
   const markdown = await fs.readFile(result.reportPath, 'utf8');
-  assert.match(markdown, /SIMULATION/);
+  assert.match(markdown, /Mode: Live Foundry model/);
+  assert.doesNotMatch(markdown, /SIMULATION|offline mock/);
   assert.match(markdown, /Existing tests: not run/);
+  assert.match(markdown, /Observed baseline inputs\/outputs: not captured for this proposal/);
   assert.ok(markdown.includes('text match \\(not a semantic edge\\)'));
   assert.match(markdown, /not a full-file hash/);
   assert.equal(Buffer.from(result.sourceSnapshot.bytes, 'base64').toString('utf8'), fixture.source);
@@ -237,14 +239,13 @@ test('pipeline rejects invented citations and edits outside the selected target 
     (candidate) => { candidate.changes = [{ path: 'README.md', originalText: '# Example', replacementText: 'changed', rationale: 'No.' }]; },
     (candidate) => { candidate.changes = [{ path: 'Target.js', originalText: 'return 1;', replacementText: 'return 2;', rationale: 'No.' }]; }
   ]) {
-    await assert.rejects(generateProposalReport(fixture.vscode, { ...fixture.input, mode: 'live' }, undefined, {
+    await assert.rejects(generateProposalReport(fixture.vscode, fixture.input, undefined, {
       env: fakeEnv,
-      fetchImpl: async (url, request) => {
-        const collected = JSON.parse(JSON.parse(request.body).messages[2].content);
-        const candidate = (await generateModelProposal(collected)).proposal;
+      fetchImpl: fakeFoundry((collected) => {
+        const candidate = proposalFor(collected);
         mutation(candidate);
-        return response(candidate);
-      }
+        return candidate;
+      })
     }), /Proposal rejected/);
     assert.equal(await fs.stat(path.join(fixture.root, 'reports')).catch(() => null), null);
   }
@@ -253,7 +254,8 @@ test('pipeline rejects invented citations and edits outside the selected target 
 test('unresolved targets retain provider warning and refuse edits', async (context) => {
   const fixture = await project(context);
   fixture.vscode.commands.executeCommand = async () => { throw new Error('provider unavailable'); };
-  const result = await generateProposalReport(fixture.vscode, fixture.input);
+  const result = await generateProposalReport(fixture.vscode, fixture.input, undefined,
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   assert.deepEqual(result.proposal.changes, []);
   assert.equal(result.targetSpanHash, null);
   assert.match(await fs.readFile(result.reportPath, 'utf8'), /provider unavailable/);
@@ -310,32 +312,7 @@ test('cancellation after exclusive open removes the empty file and newly created
   assert.equal(await fs.stat(path.join(fixture.root, 'reports')).catch(() => null), null);
 });
 
-test('known pizza mock proposes only the exact selected baseline and changed baseline yields no change', async (context) => {
-  const fixture = await project(context);
-  const pizzaPath = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
-  const baseline = await fs.readFile(path.resolve(__dirname, '../../fixtures/dotnet', pizzaPath), 'utf8');
-  await fs.mkdir(path.join(fixture.root, 'src/PizzaEligibility'), { recursive: true });
-  const targetFile = path.join(fixture.root, pizzaPath);
-  await fs.writeFile(targetFile, baseline);
-  const lines = baseline.split(/\r?\n/);
-  const range = { start: { line: lines.findIndex((line) => line.includes('public static decimal CalculateDiscountAmount')), character: 4 },
-    end: { line: lines.findLastIndex((line) => line === '    }'), character: 5 } };
-  fixture.vscode.window.showWarningMessage = async () => 'Continue with C# providers';
-  fixture.vscode.workspace.findFiles = async () => [uri(targetFile)];
-  fixture.vscode.commands.executeCommand = async (command) => command === 'vscode.executeDocumentSymbolProvider' ?
-    [{ name: 'CalculateDiscountAmount', range, selectionRange: { start: range.start, end: range.start } }] : [];
-  const input = { projectRoot: fixture.root, targetFile, targetSymbol: 'CalculateDiscountAmount' };
-  const result = await generateProposalReport(fixture.vscode, input);
-  assert.equal(result.proposal.changes.length, 1);
-  assert.equal(result.proposal.changes[0].originalText, result.target.source.text);
-  assert.match(result.proposal.changes[0].replacementText, /isMember \|\| subtotal >= 50m/);
-  assert.equal(await fs.readFile(targetFile, 'utf8'), baseline);
-  await fs.writeFile(targetFile, baseline.replace('0.10m', '0.11m'));
-  const changed = await generateProposalReport(fixture.vscode, input);
-  assert.deepEqual(changed.proposal.changes, []);
-});
-
-test('command runs offline selection and opens the returned report without mutating source', async (context) => {
+test('command always runs Live and opens the Foundry-backed report without mutating source', async (context) => {
   const fixture = await project(context);
   const { registerProposalReportCommand } = require('../src/extension');
   let callback;
@@ -346,20 +323,25 @@ test('command runs offline selection and opens the returned report without mutat
   fixture.vscode.workspace.getConfiguration = () => ({ get: (name, fallback) => fallback });
   fixture.vscode.workspace.openTextDocument = async (fileUri) => ({ uri: fileUri });
   fixture.vscode.window.activeTextEditor = { document: { uri: uri(fixture.input.targetFile), isDirty: false } };
-  fixture.vscode.window.showQuickPick = async (items) => items[0];
-  fixture.vscode.window.showInputBox = async () => 'calculate';
+  let rootPickCount = 0;
+  let inputCount = 0;
+  fixture.vscode.window.showQuickPick = async (items) => { rootPickCount += 1; return items[0]; };
+  fixture.vscode.window.showInputBox = async () => ++inputCount === 1 ? 'calculate' : 'Simplify the selected function.';
   fixture.vscode.window.withProgress = async (options, action) => action({}, { isCancellationRequested: false });
   fixture.vscode.window.showTextDocument = async (document) => { opened = document.uri.fsPath; };
   fixture.vscode.window.showErrorMessage = async () => assert.fail('Command should succeed.');
-  registerProposalReportCommand(fixture.vscode, { subscriptions: [] });
+  registerProposalReportCommand(fixture.vscode, { subscriptions: [] }, undefined,
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   const result = await callback();
   assert.equal(result.status, 'ready');
+  assert.equal(result.mode, 'live');
+  assert.equal(rootPickCount, 1);
   assert.equal(result.reportPath, opened);
-  assert.match(await fs.readFile(opened, 'utf8'), /SIMULATION/);
+  assert.match(await fs.readFile(opened, 'utf8'), /Mode: Live Foundry model/);
   assert.equal(await fs.readFile(fixture.input.targetFile, 'utf8'), fixture.source);
 });
 
-test('report tool defaults offline, confirms artifact writes and returns metadata only', async (context) => {
+test('report tool always uses Live, rejects mode overrides, and confirms report and source sharing', async (context) => {
   const fixture = await project(context);
   const { GenerateProposalReportTool } = require('../src/extension');
   const { ProposalCandidateStore } = require('../src/proposal-apply');
@@ -369,24 +351,26 @@ test('report tool defaults offline, confirms artifact writes and returns metadat
   fixture.vscode.workspace.getConfiguration = () => ({ get: (name, fallback) => fallback });
   fixture.vscode.workspace.openTextDocument = async (value) => ({ uri: value });
   fixture.vscode.window.showTextDocument = async () => {};
-  const tool = new GenerateProposalReportTool(fixture.vscode, new ProposalCandidateStore(), {
-    env: new Proxy({}, { get() { throw new Error('Mock must not read environment.'); } }),
-    fetchImpl() { assert.fail('Mock must not call transport.'); }
-  });
+  const tool = new GenerateProposalReportTool(fixture.vscode, new ProposalCandidateStore(),
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   const invoke = async (input, token) => JSON.parse((await tool.invoke({ input }, token)).parts[0].value);
   assert.equal((await invoke({ ...fixture.input, patch: 'not accepted' })).status, 'failed');
+  assert.equal((await invoke({ ...fixture.input, mode: 'mock' })).status, 'failed');
   assert.equal((await invoke(fixture.input, { isCancellationRequested: true })).status, 'cancelled');
   fixture.vscode.window.showWarningMessage = async () => undefined;
   assert.equal((await invoke(fixture.input)).status, 'cancelled');
   assert.equal(await fs.stat(path.join(fixture.root, 'reports')).catch(() => null), null);
   fixture.vscode.window.showWarningMessage = async (message, options) => {
     assert.equal(options.modal, true);
-    assert.match(options.detail, /Mode: mock/);
-    return 'Generate report';
+    if (message === 'Generate and write a proposal report without changing source?') {
+      assert.match(options.detail, /Mode: Live Foundry/);
+      return 'Generate report';
+    }
+    return 'Send collected context';
   };
   const result = await invoke(fixture.input);
   assert.equal(result.status, 'ready');
-  assert.equal(result.mode, 'mock');
+  assert.equal(result.mode, 'live');
   assert.equal(result.proposalId, null);
   assert.equal(result.proposal, undefined);
   assert.equal(result.sourceSnapshot, undefined);
@@ -426,15 +410,26 @@ test('Node provider pipeline generates known candidate and ID-only tool applies 
   fixture.vscode.LanguageModelToolResult = class { constructor(parts) { this.parts = parts; } };
   fixture.vscode.LanguageModelTextPart = class { constructor(value) { this.value = value; } };
   const store = new ProposalCandidateStore();
-  const generation = new GenerateProposalReportTool(fixture.vscode, store);
+  const generation = new GenerateProposalReportTool(fixture.vscode, store, {
+    env: fakeEnv,
+    fetchImpl: fakeFoundry((collected) => ({
+      ...proposalFor(collected, [{ path: collected.target.path, originalText: collected.target.source.text,
+        replacementText: NODE_REPLACEMENT, rationale: 'Replace nested guards with direct early exits.' }]),
+    }))
+  });
   const input = { projectRoot: fixture.root, targetFile, targetSymbol: 'transfer' };
-  fixture.vscode.window.showWarningMessage = async () => 'Generate report';
+  fixture.vscode.window.showWarningMessage = async (message) => message === 'Generate and write a proposal report without changing source?'
+    ? 'Generate report' : 'Send collected context';
   const metadata = JSON.parse((await generation.invoke({ input })).parts[0].value);
-  assert.equal(metadata.status, 'ready');
+  assert.equal(metadata.status, 'ready', JSON.stringify(metadata));
   assert.ok(metadata.proposalId);
   assert.equal(store.list()[0].id, metadata.proposalId);
   assert.deepEqual(await fs.readFile(targetFile), original);
   const report = await fs.readFile(metadata.reportPath, 'utf8');
+  assert.match(report, /Observed baseline inputs\/outputs: captured/);
+  assert.match(report, /extension generated these bounded inputs/i);
+  assert.equal((report.match(/### Sample \d+/g) ?? []).length, 5);
+  assert.match(report, /Observed stdout:[\s\S]*"alice"[\s\S]*"bob"/);
   assert.match(report, /return.*source missing/);
   const provenance = report.split('### Discovery Provenance And Limits')[1].split('### Validated Source Catalog')[0];
   const discovery = JSON.parse(provenance.slice(provenance.indexOf('{'), provenance.lastIndexOf('}') + 1));
@@ -450,10 +445,13 @@ test('Node provider pipeline generates known candidate and ID-only tool applies 
   const result = JSON.parse((await apply.invoke({ input: { proposalId: metadata.proposalId } })).parts[0].value);
   assert.equal(result.status, 'applied', JSON.stringify(result));
   assert.ok((await fs.readFile(targetFile, 'utf8')).replace(/\r\n/g, '\n').includes(NODE_REPLACEMENT));
-  const again = await generateProposalReport(fixture.vscode, input);
+  fixture.vscode.window.showWarningMessage = async () => 'Send collected context';
+  const again = await generateProposalReport(fixture.vscode, input, undefined,
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   assert.deepEqual(again.proposal.changes, []);
   fixture.vscode.commands.executeCommand = async () => { throw new Error('TypeScript provider unavailable'); };
-  const unavailable = await generateProposalReport(fixture.vscode, input);
+  const unavailable = await generateProposalReport(fixture.vscode, input, undefined,
+    { env: fakeEnv, fetchImpl: fakeFoundry() });
   assert.deepEqual(unavailable.proposal.changes, []);
   assert.match(await fs.readFile(unavailable.reportPath, 'utf8'), /provider unavailable/);
 });

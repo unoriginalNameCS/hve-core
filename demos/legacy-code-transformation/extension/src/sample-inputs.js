@@ -6,41 +6,6 @@ const MAX_SAMPLE_CASES = 5;
 const MAX_ACCOUNT_BALANCE = 1000000;
 const ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
-const SAMPLE_INPUT_SCHEMA = Object.freeze({
-  pizzaCases: {
-    type: 'array',
-    items: {
-      type: 'object', additionalProperties: false, required: ['subtotal', 'isMember'],
-      properties: { subtotal: { type: 'string' }, isMember: { type: 'boolean' } }
-    }
-  },
-  nodeCases: {
-    type: 'array',
-    items: {
-      type: 'object', additionalProperties: false,
-      required: ['accounts', 'sourceId', 'destinationId', 'amount'],
-      properties: {
-        accounts: {
-          type: 'array', items: {
-            type: 'object', additionalProperties: false, required: ['id', 'balance'],
-            properties: { id: { type: 'string' }, balance: { type: 'number' } }
-          }
-        },
-        sourceId: { type: 'string' },
-        destinationId: { type: 'string' },
-        amount: { type: 'number' }
-      }
-    }
-  }
-});
-
-function responseSchema(proposalSchema) {
-  const schema = structuredClone(proposalSchema);
-  schema.required.push('pizzaCases', 'nodeCases');
-  Object.assign(schema.properties, structuredClone(SAMPLE_INPUT_SCHEMA));
-  return schema;
-}
-
 function isFixtureTarget(target) {
   return (target.path === PIZZA_TARGET_PATH && target.symbol === 'CalculateDiscountAmount') ||
     (target.path === NODE_TARGET_PATH && target.symbol === 'transfer');
@@ -111,27 +76,25 @@ function validateSampleInputs(sampleInputs, target, required = false) {
   return structuredClone(sampleInputs);
 }
 
-function selectSampleInputs(payload, target) {
-  if (!Array.isArray(payload.pizzaCases) || !Array.isArray(payload.nodeCases)) {
-    throw sampleInputError('arrays', 'Foundry response must include pizzaCases and nodeCases arrays.');
+function generateSampleInputs(target) {
+  let sampleInputs = [];
+  if (target.path === PIZZA_TARGET_PATH && target.symbol === 'CalculateDiscountAmount') {
+    sampleInputs = [
+      { subtotal: '25.00', isMember: true },
+      { subtotal: '49.90', isMember: false },
+      { subtotal: '50.00', isMember: false },
+      { subtotal: '50.10', isMember: false }
+    ];
+  } else if (target.path === NODE_TARGET_PATH && target.symbol === 'transfer') {
+    sampleInputs = [
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 25 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'missing', amount: 25 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'alice', amount: 25 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 101 }
+    ];
   }
-  const isPizza = target.path === PIZZA_TARGET_PATH && target.symbol === 'CalculateDiscountAmount';
-  const isNode = target.path === NODE_TARGET_PATH && target.symbol === 'transfer';
-  const selected = isPizza ? payload.pizzaCases : isNode ? payload.nodeCases : [];
-  const unused = isPizza ? payload.nodeCases : isNode ? payload.pizzaCases : [...payload.pizzaCases, ...payload.nodeCases];
-  if (unused.length !== 0) {
-    throw sampleInputError('wrong-array', 'Foundry response must provide cases only for the selected controlled fixture target.');
-  }
-  if (isFixtureTarget(target) && selected.length < 3) {
-    throw sampleInputError('too-few', 'Foundry response must provide three to five cases for the selected controlled fixture target.');
-  }
-  if (selected.length > MAX_SAMPLE_CASES) {
-    throw sampleInputError('too-many', 'Foundry response must provide three to five cases for the selected controlled fixture target.');
-  }
-  if (!isFixtureTarget(target) && (payload.pizzaCases.length !== 0 || payload.nodeCases.length !== 0)) {
-    throw sampleInputError('unsupported', 'Foundry response must not provide cases for this target.');
-  }
-  return Object.freeze(validateSampleInputs(selected, target, isFixtureTarget(target)));
+  return Object.freeze(validateSampleInputs(sampleInputs, target, isFixtureTarget(target)));
 }
 
 function expectedPizzaCase(sample) {
@@ -163,5 +126,5 @@ function expectedSampleCase(target, sample) {
   throw new Error('No independent sample-input oracle is configured for this target.');
 }
 
-module.exports = { PIZZA_TARGET_PATH, NODE_TARGET_PATH, MAX_SAMPLE_CASES, SAMPLE_INPUT_SCHEMA,
-  responseSchema, isFixtureTarget, selectSampleInputs, validateSampleInputs, expectedSampleCase };
+module.exports = { PIZZA_TARGET_PATH, NODE_TARGET_PATH, MAX_SAMPLE_CASES,
+  isFixtureTarget, generateSampleInputs, validateSampleInputs, expectedSampleCase };

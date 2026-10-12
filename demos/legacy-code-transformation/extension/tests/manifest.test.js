@@ -121,7 +121,9 @@ test('generation registration shares the candidate store and rejects missing mod
   assert.equal(registrations[0].tool.store, store);
   const tool = manifest.contributes.languageModelTools.find((item) => item.name === GENERATE_REPORT_TOOL);
   assert.equal(tool.inputSchema.additionalProperties, false);
-  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['projectRoot', 'targetFile', 'targetSymbol', 'mode', 'changeRequest']);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['projectRoot', 'targetFile', 'targetSymbol', 'changeRequest']);
+  assert.match(tool.modelDescription, /Always use the configured Live Azure OpenAI\/Foundry deployment/);
+  assert.ok(!JSON.stringify(tool.inputSchema).includes('mock'));
 });
 
 test('standalone launch configurations prompt for fixture copies and contain no credentials', () => {

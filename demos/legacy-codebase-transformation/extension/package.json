@@ -1,7 +1,7 @@
 {
   "name": "legacy-codebase-transformation-demo",
   "displayName": "Legacy Codebase Transformation Demo",
-  "description": "A bounded, approval-gated codebase refactoring review proof of concept.",
+  "description": "Resumable supported-source scans and approval-gated per-file refactoring batches.",
   "version": "0.1.0",
   "publisher": "hve-core-demo",
   "engines": {
@@ -15,7 +15,7 @@
     "onStartupFinished"
   ],
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-scan.js && node --check src/scan-pipeline.js && node --check src/finding-store.js && node --check src/model-selection.js && node --check src/proposal-workflow.js",
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-scan.js && node --check src/scan-pipeline.js && node --check src/finding-store.js && node --check src/model-selection.js && node --check src/proposal-workflow.js && node --check src/scan-report.js && node --check src/behavior-check.js",
     "test": "node --test"
   },
   "contributes": {
@@ -30,35 +30,43 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_scan_workspace",
         "displayName": "Scan workspace for refactoring findings",
-        "modelDescription": "Scan supported C#, JavaScript, and TypeScript source beneath the exact opened workspace root. Select a model, then show scope, file count, bytes, request count, model, and destination before any source is sent. Stop at 30 requests or 30 findings, validate every reported span against collected source, and report incomplete counts. No project commands or source writes.",
-        "userDescription": "Run a bounded model-assisted scan after per-scan source-sharing confirmation.",
+        "modelDescription": "Prepare a source-sharing preview showing the exact root, eligible files/bytes, batch requests/bytes, model, destination, and limits. Ask the user in Copilot Chat before confirming its one-use previewId. A confirmed batch rechecks source and session freshness, sends at most 30 requests, retains all valid unique findings, and saves/opens a cumulative report. When canContinue is true, prepare another preview with the exact projectRoot and current scanId, then ask for separate approval. Reports distinguish inventoried, reviewed, failed, unsupported, and remaining coverage. No project files are changed.",
+        "userDescription": "Preview or continue a source scan with separate chat approval and a cumulative coverage report.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["projectRoot"],
+          "required": ["phase"],
           "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "confirm"] },
             "projectRoot": {
               "type": "string",
               "description": "Absolute path that exactly matches an open VS Code workspace folder."
-            }
+            },
+            "scanId": {
+              "type": "string",
+              "description": "Optional on prepare only: the current session scan ID with remaining chunks, to continue unchanged source. Omit for a fresh scan."
+            },
+            "previewId": { "type": "string" },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
           }
-        },
-        "tags": ["readOnly"]
+        }
       },
       {
         "name": "legacy_codebase_transformation_demo_review_findings",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_review_findings",
         "displayName": "Review scan findings",
-        "modelDescription": "List, refresh, select, dismiss, or explicitly approve a session-bound finding from the latest codebase scan. Refresh rechecks its root and source hash. Finding approval permits proposal drafting only and never authorizes writing.",
-        "userDescription": "Inspect and disposition current findings; approval uses a separate extension confirmation.",
+        "modelDescription": "List or refresh current report findings to resolve IDs for direct application. Existing report suggestions need no approval disposition: pass selected findingIds directly to apply_proposal prepare and ask once at its exact-write preview. Use disposition only for explicit rejection or custom proposal drafting, with unique, disjoint approveIds and rejectIds. Source freshness is checked before status changes; disposition never authorizes writing.",
+        "userDescription": "Inspect findings and approve or reject exact finding IDs in chat.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
           "required": ["action"],
           "properties": {
-            "action": { "type": "string", "enum": ["list", "refresh", "select", "dismiss", "approve"] },
-            "findingId": { "type": "string" }
+            "action": { "type": "string", "enum": ["list", "refresh", "select", "dismiss", "disposition"] },
+            "findingId": { "type": "string" },
+            "approveIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "rejectIds": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
           }
         },
         "tags": ["readOnly"]
@@ -68,15 +76,18 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_generate_proposal",
         "displayName": "Draft proposal from an approved finding",
-        "modelDescription": "Accept only a current extension-owned finding ID after explicit finding approval. Recollect and validate its exact source span, then request separate per-proposal consent showing the source context, change request, model, and destination. Return one unverified replacement for the finding span. This tool never writes source.",
-        "userDescription": "Draft one exact-span proposal after finding approval and separate source-sharing consent.",
+        "modelDescription": "Prepare an exact proposal source-sharing preview for a currently approved finding, including requested refactor, file/context range, context byte count and hash, source hash, model, and destination. Raw source context stays inside the extension until explicit chat approval. Confirm only with the one-use previewId and approve/reject decision, then recheck context before sending. Return one unverified exact-span proposal; never write source.",
+        "userDescription": "Preview proposal context, ask for chat approval, and draft one exact-span proposal.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["findingId"],
+          "required": ["phase"],
           "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "confirm"] },
             "findingId": { "type": "string" },
-            "changeRequest": { "type": "string", "maxLength": 1000 }
+            "changeRequest": { "type": "string", "maxLength": 1000 },
+            "previewId": { "type": "string" },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
           }
         },
         "tags": ["proposalBound"]
@@ -85,16 +96,63 @@
         "name": "legacy_codebase_transformation_demo_apply_proposal",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_apply_proposal",
-        "displayName": "Apply an exactly approved proposal",
-        "modelDescription": "Accept only a proposal ID from the extension-owned pending proposal queue. Revalidate the approved finding, workspace root, source version and hash, exact span, proposal hash, and report hash. Show the exact original and replacement in a separate modal confirmation, revalidate again, then apply only that span and save. Never run project tests or commands.",
-        "userDescription": "Apply one pending proposal only after you review and approve its exact diff.",
+        "displayName": "Apply reviewed report changes or proposals",
+        "modelDescription": "Default after a scan report: prepare with 1-30 unique findingIds from one file to reuse the report's exact before/after suggestions locally. No prior finding disposition, model request, or second report is required. Selection requests prepare the preview; they do not authorize writing. Alternatively prepare with one proposalId or a same-file proposalIds batch for custom generated proposals. Present every exact change and source hash, ask once for explicit write approval, then confirm only the one-use previewId and decision. Reject mixed-file, overlapping, dismissed, stale or dirty source. Revalidate candidates, findings, source and editor state before one edit/save. Report uncertain write outcomes honestly and never retry consumed candidates. Never run project tests or commands.",
+        "userDescription": "Apply report suggestions with one exact-write approval, without another model request.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["proposalId"],
-          "properties": { "proposalId": { "type": "string" } }
+          "required": ["phase"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "confirm"] },
+            "proposalId": { "type": "string" },
+            "findingIds": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "maxItems": 30,
+              "uniqueItems": true,
+              "description": "Prepare only: reuse current report suggestions from one file. Use instead of proposalId or proposalIds; no proposal-generation approval is needed."
+            },
+            "proposalIds": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "maxItems": 30,
+              "uniqueItems": true,
+              "description": "Prepare only: use instead of proposalId for a same-file exact-diff batch."
+            },
+            "previewId": { "type": "string" },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
+          }
         },
         "tags": ["writesWorkspace"]
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_check_behavior",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_check_behavior",
+        "displayName": "Check applied banking behavior",
+        "modelDescription": "Optional after a successful apply only: prepare using applied proposalIds from the apply result. Preview eight existing tests and nine fixed cases against the pinned original banking snapshot and the exact saved transformed file in disposable local copies. Show commands, source hashes, runtime and execution warning, ask for separate explicit execution approval, and wait before confirm. Apply approval never authorizes execution. Reject unknown projects, changed harnesses, dirty buffers or stale source without executing. Confirm only the one-use previewId and approve/reject decision. Report passed, failed or not-checked, test counts and matching case count, never complete equivalence. No model requests, installs, project source writes, arbitrary commands or rollback.",
+        "userDescription": "Optionally compare known banking tests and sample outputs after a separately approved execution preview.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "confirm"] },
+            "proposalIds": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "maxItems": 30,
+              "uniqueItems": true,
+              "description": "Prepare only: successfully applied IDs from one banking file and its original snapshot."
+            },
+            "previewId": { "type": "string" },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
+          }
+        }
       }
     ]
   }
