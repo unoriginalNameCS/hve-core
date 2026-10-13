@@ -14,7 +14,7 @@ const { BehaviorCheckTool } = require('../src/extension');
 async function appliedFixture(context, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lcb-behavior-test-'));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
-  await fs.cp(path.resolve(__dirname, '../../../legacy-code-transformation/fixtures/node'), root, { recursive: true });
+  await fs.cp(path.resolve(__dirname, '../../../targeted-legacy-code-transformation/fixtures/node'), root, { recursive: true });
   const sourcePath = path.join(root, 'src/transfer.js');
   const originalBytes = await fs.readFile(sourcePath);
   const originalText = new TextDecoder().decode(originalBytes);

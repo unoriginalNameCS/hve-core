@@ -1,7 +1,7 @@
 {
   "name": "legacy-codebase-transformation-demo",
   "displayName": "Legacy Codebase Transformation Demo",
-  "description": "Resumable supported-source scans and approval-gated per-file refactoring batches.",
+  "description": "Resumable technical-debt scans, approval-gated source refactoring and separately approved npm dependency updates.",
   "version": "0.1.0",
   "publisher": "hve-core-demo",
   "engines": {
@@ -15,13 +15,16 @@
     "onStartupFinished"
   ],
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-scan.js && node --check src/scan-pipeline.js && node --check src/finding-store.js && node --check src/model-selection.js && node --check src/proposal-workflow.js && node --check src/scan-report.js && node --check src/behavior-check.js",
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-scan.js && node --check src/scan-pipeline.js && node --check src/finding-store.js && node --check src/model-selection.js && node --check src/proposal-workflow.js && node --check src/scan-report.js && node --check src/behavior-check.js && node --check src/dependency-inventory.js && node --check src/dependency-assessment.js && node --check src/dependency-report.js && node --check src/dependency-updates.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "semver": "7.7.2"
   },
   "contributes": {
     "chatAgents": [
       {
-        "path": "./agents/codebase-level-legacy-code-transformation.agent.md"
+        "path": "./agents/codebase-transformation.agent.md"
       }
     ],
     "languageModelTools": [
@@ -30,8 +33,8 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_scan_workspace",
         "displayName": "Scan workspace for refactoring findings",
-        "modelDescription": "Prepare a source-sharing preview showing the exact root, eligible files/bytes, batch requests/bytes, model, destination, and limits. Ask the user in Copilot Chat before confirming its one-use previewId. A confirmed batch rechecks source and session freshness, sends at most 30 requests, retains all valid unique findings, and saves/opens a cumulative report. When canContinue is true, prepare another preview with the exact projectRoot and current scanId, then ask for separate approval. Reports distinguish inventoried, reviewed, failed, unsupported, and remaining coverage. No project files are changed.",
-        "userDescription": "Preview or continue a source scan with separate chat approval and a cumulative coverage report.",
+        "modelDescription": "Prepare a source-sharing preview for evidence-backed technical-debt findings, showing the exact open root, eligible files/bytes, batch requests/bytes, model, destination and limits. Analysis checks the whole supplied source chunk and returns up to five focused before/after proposals per request. For a request covering technical debt and dependencies, set includeDependencies:true on prepare: the same preview also lists every npm/OSV identifier, destination, payload, document hash and metadata limit. Present both disclosures and wait for a later explicit approval covering both before confirming only its one-use previewId and decision. Approval runs bounded source analysis and dependency assessment and saves/opens ONE combined report. That report automatically proposes every eligible direct npm version update with package.json before/after snippets; the user selects all/some only after reviewing it. Source-only approval does not cover metadata. Changed snapshots block transfers. Source-only scans omit dependency lookups. Continuations use the current scanId and fresh approval; combined continuation preserves the dependency mode. No project files, packages, tests or scripts are changed or executed during analysis.",
+        "userDescription": "Preview source analysis or a combined technical-debt and npm dependency review, then open one evidence report.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
@@ -45,6 +48,10 @@
             "scanId": {
               "type": "string",
               "description": "Optional on prepare only: the current session scan ID with remaining chunks, to continue unchanged source. Omit for a fresh scan."
+            },
+            "includeDependencies": {
+              "type": "boolean",
+              "description": "Prepare only. Set true when the user requests source technical debt and npm dependency evidence together. The combined preview requires explicit approval of both transfers and produces one report; false means source-only. Omitted continuations preserve the current scan mode."
             },
             "previewId": { "type": "string" },
             "decision": { "type": "string", "enum": ["approve", "reject"] }
@@ -129,6 +136,77 @@
         "tags": ["writesWorkspace"]
       },
       {
+        "name": "legacy_codebase_transformation_demo_assess_dependencies",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_assess_dependencies",
+        "displayName": "Assess npm dependency evidence",
+        "modelDescription": "Optional only on explicit dependency request, independent of source scanning. Prepare with the exact open projectRoot to inventory visible npm declarations and supported v2/v3 lock tuples locally. Show every outbound package name/version, file hashes, gaps, public registry and OSV endpoints, privacy warning, budgets and expiry; ask for metadata-sharing approval and wait for a later reply. Confirm only its one-use previewId and approve/reject decision. Recheck unchanged saved inputs before lookup; decline, dirty/stale/expired/replayed previews send nothing. Save a separate immutable extension-storage report of latest/range candidates, exact-version deprecation and published provider-returned advisory IDs, severity/fixes, unknown coverage and timestamps. Input changes during lookup make historical evidence stale with actual request counts. An empty-dependency project is not-applicable with zero requests and no forced approval. Never install, upgrade, write project files, execute project commands, send full files, query candidate advisories or claim security approval, exploitability or compatibility.",
+        "userDescription": "Preview public package metadata sharing, then optionally get npm update, deprecation and published advisory evidence.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "confirm"] },
+            "projectRoot": { "type": "string", "minLength": 1, "description": "Prepare only: exact absolute canonical open workspace root." },
+            "previewId": { "type": "string", "minLength": 1 },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
+          },
+          "oneOf": [
+            {
+              "properties": { "phase": { "const": "prepare" } },
+              "required": ["projectRoot"],
+              "not": { "anyOf": [{ "required": ["previewId"] }, { "required": ["decision"] }] }
+            },
+            {
+              "properties": { "phase": { "const": "confirm" } },
+              "required": ["previewId", "decision"],
+              "not": { "required": ["projectRoot"] }
+            }
+          ]
+        }
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_update_dependencies",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_update_dependencies",
+        "displayName": "Propose and apply selected npm updates",
+        "modelDescription": "Use only when the user selects direct package-version updates from npm evidence. Prepare is local: provide exact open projectRoot and unique updates[{name,version}]. It accepts only a supported single-root npm package with colocated package-lock v2/v3 and public lock origins. Present current versions, selected versions, hashes, and the disclosure that an approved npm lock-only resolution may request public metadata for the selected packages and transitive graph. Wait for a later explicit resolution approval before phase resolve. Resolution runs npm in a disposable folder with only the root manifest/lock, fixed public registry, empty user/global npm config, --package-lock-only, --ignore-scripts, --no-audit and --no-fund; it installs nothing, executes no project scripts/tests, and writes no project files. It opens exact package.json/package-lock diffs and returns a second one-use preview. Review both diffs and ask for separate write approval before phase apply. Apply revalidates hashes and dirty buffers and writes only these exact two files. Replacements requiring API/source migration, workspaces, shrinkwrap, private/unknown lock origins and candidate advisory lookups are not supported. On failure report sanitized npm exit/error codes when present; a generic exit code does not prove the selected version is missing. Raw npm logs are not returned. Report stale, failed, cancelled, partial or unknown writes honestly; never retry blindly.",
+        "userDescription": "Resolve selected npm version updates in a disposable copy, review the exact manifest/lock diff, then apply only after separate approval.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["prepare", "resolve", "apply"] },
+            "projectRoot": { "type": "string", "minLength": 1 },
+            "updates": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "version"],
+                "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+              }
+            },
+            "previewId": { "type": "string", "minLength": 1 },
+            "decision": { "type": "string", "enum": ["approve", "reject"] }
+          },
+          "oneOf": [
+            { "properties": { "phase": { "const": "prepare" } }, "required": ["projectRoot", "updates"],
+              "not": { "anyOf": [{ "required": ["previewId"] }, { "required": ["decision"] }] } },
+            { "properties": { "phase": { "const": "resolve" } }, "required": ["previewId", "decision"],
+              "not": { "anyOf": [{ "required": ["projectRoot"] }, { "required": ["updates"] }] } },
+            { "properties": { "phase": { "const": "apply" } }, "required": ["previewId", "decision"],
+              "not": { "anyOf": [{ "required": ["projectRoot"] }, { "required": ["updates"] }] } }
+          ]
+        },
+        "tags": ["writesWorkspace"]
+      },
+      {
         "name": "legacy_codebase_transformation_demo_check_behavior",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_codebase_transformation_demo_check_behavior",
@@ -153,6 +231,26 @@
             "decision": { "type": "string", "enum": ["approve", "reject"] }
           }
         }
+      },
+      {
+        "name": "legacy_codebase_transformation_demo_transform_codebase",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "legacy_codebase_transformation_demo_transform_codebase",
+        "displayName": "Review and transform codebase",
+        "modelDescription": "Two steps. action 'review' with the exact open projectRoot: scans all eligible source for readability and maintainability refactors and checks npm dependencies for deprecation and published advisories, then writes and opens ONE report ending with a Transformation Plan (source changes plus npm updates for deprecated or vulnerable direct dependencies). Nothing is changed. Present the report summary and ask the user to approve or reject it, then wait. action 'apply' with the returned reviewId and the user's decision: on approve, applies every planned source change and npm update; on reject, changes nothing. Tests are not run.",
+        "userDescription": "Review the codebase and npm dependencies in one report, then apply it after approval.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action"],
+          "properties": {
+            "action": { "type": "string", "enum": ["review", "apply"] },
+            "projectRoot": { "type": "string", "description": "Review only: absolute path of the open workspace folder." },
+            "reviewId": { "type": "string", "description": "Apply only: reviewId returned by review." },
+            "decision": { "type": "string", "enum": ["approve", "reject"], "description": "Apply only: the user's decision on the report." }
+          }
+        },
+        "tags": ["writesWorkspace"]
       }
     ]
   }

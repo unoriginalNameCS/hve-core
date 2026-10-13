@@ -5,8 +5,11 @@ const { scanPrompt } = require('./workspace-scan');
 const { chunkSourceFiles, hashSource, inventorySourceFiles } = require('./workspace-scan');
 
 const MAX_MODEL_REQUESTS = 30;
+const MAX_FINDINGS_PER_REQUEST = 5;
 const FINDING_CATEGORIES = Object.freeze([
-  'redundant-control-flow', 'repeated-local-expression', 'complex-function-simplification'
+  'redundant-control-flow', 'repeated-local-expression', 'complex-function-simplification',
+  'code-duplication', 'excessive-complexity', 'unnecessary-abstraction', 'unclear-intent',
+  'obsolete-pattern', 'fragile-structure', 'other-technical-debt'
 ]);
 
 async function prepareWorkspaceScan(vscode, projectRoot, token) {
@@ -39,10 +42,41 @@ function sourceOffset(content, lineNumber, character) {
   return lines.slice(0, lineNumber - 1).reduce((total, line) => total + line.length + 1, 0) + character;
 }
 
+function parseFindingResponse(output) {
+  if (typeof output !== 'string') return output;
+  const text = output.trim();
+  try { return JSON.parse(text); } catch { }
+  const start = text.indexOf('{');
+  if (start < 0) throw new Error('Model response is not valid JSON.');
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const suffix = text.slice(index + 1);
+        if (suffix.includes('{')) throw new Error('Model response must contain only one JSON object.');
+        try { return JSON.parse(text.slice(start, index + 1)); } catch { break; }
+      }
+    }
+  }
+  throw new Error('Model response is not valid JSON.');
+}
+
 function validateFindingResponse(payload, chunk, rejections = []) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-      Object.keys(payload).length !== 1 || !Array.isArray(payload.findings) || payload.findings.length > 3) {
-    rejections.push('Response must contain only a findings array with at most three entries.');
+      Object.keys(payload).length !== 1 || !Array.isArray(payload.findings) || payload.findings.length > MAX_FINDINGS_PER_REQUEST) {
+    rejections.push(`Response must contain only a findings array with at most ${MAX_FINDINGS_PER_REQUEST} entries.`);
     return [];
   }
   const requiredKeys = [
@@ -160,18 +194,19 @@ async function scanWorkspace(vscode, projectRoot, model, token, options = {}) {
         !Number.isInteger(previous.nextChunk) || previous.nextChunk < 0 || previous.nextChunk > chunks.length))) {
     return { status: 'stale', scanId, root: inventory.root.realPath, findings: [], files: inventory.files.length,
       bytes: inventory.bytes, projectedRequests: chunks.length, requests: 0, skipped, rejected: 0,
-      reason: 'The workspace changed after the chat preview. Prepare a new scan.' };
+      excluded: inventory.excluded, reason: 'The workspace changed after the chat preview. Prepare a new scan.' };
   }
   if (chunks.length && (!model || typeof model.sendRequest !== 'function')) {
     throw new Error('Select an available language model before scanning.');
   }
   if (options.chatApproved !== true || token?.isCancellationRequested) {
     return { status: 'cancelled', scanId, root: inventory.root.realPath, findings: [], files: inventory.files.length,
-      bytes: inventory.bytes, projectedRequests: chunks.length, requests: 0, skipped, rejected: 0, incomplete: false };
+      bytes: inventory.bytes, projectedRequests: chunks.length, requests: 0, skipped, rejected: 0,
+      excluded: inventory.excluded, incomplete: false };
   }
 
   const requestModel = options.requestModel ?? (async (chunk) => {
-    const prompt = scanPrompt(chunk, 3);
+    const prompt = scanPrompt(chunk, MAX_FINDINGS_PER_REQUEST);
     if (Buffer.byteLength(prompt, 'utf8') > 256 * 1024) throw new Error('A scan request exceeded the 256 KB context limit.');
     const message = vscode.LanguageModelChatMessage.User(prompt);
     const response = await model.sendRequest([message], {}, token);
@@ -199,7 +234,7 @@ async function scanWorkspace(vscode, projectRoot, model, token, options = {}) {
     const chunkIndex = nextChunk;
     const chunk = { ...chunks[chunkIndex], scanId };
     nextChunk += 1;
-    const prompt = scanPrompt(chunk, 3);
+      const prompt = scanPrompt(chunk, MAX_FINDINGS_PER_REQUEST);
     if (Buffer.byteLength(prompt, 'utf8') > 256 * 1024) {
       rejected += 1;
       failedChunks.push({ path: chunk.path, startLine: chunk.startLine, reason: 'Request exceeds the context byte limit.' });
@@ -211,8 +246,8 @@ async function scanWorkspace(vscode, projectRoot, model, token, options = {}) {
       batchRequests += 1;
       sharedBytes += Buffer.byteLength(chunk.content, 'utf8');
       const output = await requestModel(chunk, token);
-      failureReason = 'Model response is not valid JSON; return a JSON object without code fences or surrounding prose.';
-      const payload = typeof output === 'string' ? JSON.parse(output) : output;
+      failureReason = 'Model response is not valid JSON; return one JSON object that matches the requested schema.';
+        const payload = parseFindingResponse(output);
       const rejections = [];
       const validated = validateFindingResponse(payload, chunk, rejections);
       if (rejections.length) {
@@ -250,8 +285,9 @@ async function scanWorkspace(vscode, projectRoot, model, token, options = {}) {
     requests, batchRequests, batchNumber: (previous?.batchNumber ?? 0) + 1,
     nextChunk, remainingChunks, reviewedChunks: [...reviewedChunks], filesReviewed,
     sharedBytes, skipped, skippedFiles: prepared.skippedFiles, unsupportedFiles: inventory.unsupportedFiles,
+    excluded: inventory.excluded,
     failedChunks, rejected, incomplete, canContinue: remainingChunks > 0
   };
 }
 
-module.exports = { FINDING_CATEGORIES, MAX_MODEL_REQUESTS, prepareWorkspaceScan, scanWorkspace, sourceOffset, validateFindingResponse };
+module.exports = { FINDING_CATEGORIES, MAX_FINDINGS_PER_REQUEST, MAX_MODEL_REQUESTS, prepareWorkspaceScan, scanWorkspace, sourceOffset, validateFindingResponse };

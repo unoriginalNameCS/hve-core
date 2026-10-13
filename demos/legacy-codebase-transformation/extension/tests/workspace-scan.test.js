@@ -8,9 +8,10 @@ const test = require('node:test');
 const { chunkSourceFiles, inventorySourceFiles, scanPrompt } = require('../src/workspace-scan');
 const { scanWorkspace, validateFindingResponse } = require('../src/scan-pipeline');
 const { FindingStore } = require('../src/finding-store');
+const { ProposalStore } = require('../src/proposal-workflow');
 const { hashSource } = require('../src/workspace-scan');
 const { renderScanReport, writeScanReport } = require('../src/scan-report');
-const { ReviewFindingsTool, ScanWorkspaceTool } = require('../src/extension');
+const { ReviewFindingsTool, ScanWorkspaceTool, TransformCodebaseTool } = require('../src/extension');
 
 function uri(filePath) {
   return { scheme: 'file', authority: '', fsPath: filePath };
@@ -66,8 +67,186 @@ async function scanToolFixture(context, count = 31, requestModel) {
     assert.equal(preview.status, 'awaiting-decision');
     return invoke({ phase: 'confirm', previewId: preview.previewId, decision: 'approve' }, token);
   };
-  return { projectRoot, sourceFiles, store, tool, state, invoke, approve };
+  return { projectRoot, sourceFiles, store, tool, state, vscode, invoke, approve };
 }
+
+test('technical-debt prompt broadens review and explicitly checks redundant else after return', () => {
+  const prompt = JSON.parse(scanPrompt({ path: 'src/index.js', content: 'if (ready) return value; else return fallback;\n',
+    startLine: 1, sourceHash: 'hash' }, 5));
+  assert.match(prompt.instructions, /concrete technical debt/);
+  assert.match(prompt.instructions, /else\/else-if after a branch that returns/);
+  assert.match(prompt.instructions, /category labels are not an exhaustive checklist/);
+  assert.match(prompt.instructions, /Preserve behavior/);
+  assert.equal(prompt.remainingFindingBudget, 5);
+});
+
+async function combinedToolFixture(context, requestModel) {
+  const fixture = await scanToolFixture(context, 1, requestModel);
+  const manifest = { name: 'sample', version: '1.0.0', dependencies: { alpha: '^1' } };
+  for (const [name, value] of Object.entries({ 'package.json': manifest,
+    'package-lock.json': { name: 'sample', version: '1.0.0', lockfileVersion: 3,
+      packages: { '': manifest, 'node_modules/alpha': { version: '1.0.0',
+        resolved: 'https://registry.npmjs.org/alpha/-/alpha-1.0.0.tgz' } } } })) {
+    const filePath = path.join(fixture.projectRoot, name);
+    await fs.writeFile(filePath, JSON.stringify(value));
+    fixture.sourceFiles.push(uri(filePath));
+  }
+  const calls = [];
+  fixture.tool.options.transport = async (request) => {
+    calls.push(request);
+    return request.method === 'POST' ? {} : { name: 'alpha', 'dist-tags': { latest: '1.2.0' },
+      versions: { '1.0.0': { name: 'alpha', version: '1.0.0', deprecated: 'Use a newer release.' },
+        '1.2.0': { name: 'alpha', version: '1.2.0' } } };
+  };
+  let opened = 0;
+  fixture.tool.vscode.window.showTextDocument = async () => { opened += 1; };
+  return { ...fixture, calls, opened: () => opened,
+    prepareCombined: () => fixture.invoke({ phase: 'prepare', projectRoot: fixture.projectRoot, includeDependencies: true }) };
+}
+
+test('combined preview and decline send no source or metadata and cannot be reused', async (context) => {
+  const fixture = await combinedToolFixture(context);
+  const preview = await fixture.prepareCombined();
+  assert.equal(preview.status, 'awaiting-decision');
+  assert.equal(preview.includeDependencies, true);
+  assert.deepEqual(preview.dependencies.registryNames, ['alpha']);
+  assert.deepEqual(preview.dependencies.advisoryTuples, [{ name: 'alpha', version: '1.0.0' }]);
+  assert.equal(preview.dependencies.destinations.length, 2);
+  assert.match(preview.approvalScope, /both/);
+  assert.equal(fixture.state.requests, 0);
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(fixture.opened(), 0);
+  const input = { phase: 'confirm', previewId: preview.previewId, decision: 'reject' };
+  const declined = await fixture.invoke(input);
+  assert.equal(declined.status, 'cancelled');
+  assert.equal(declined.dependencyRequests, 0);
+  assert.equal((await fixture.invoke({ ...input, decision: 'approve' })).status, 'rejected');
+  assert.equal(fixture.state.requests, 0);
+  assert.equal(fixture.calls.length, 0);
+});
+
+test('combined approval writes and opens one report containing source findings and npm evidence', async (context) => {
+  const fixture = await combinedToolFixture(context);
+  const before = await Promise.all(fixture.sourceFiles.map((fileUri) => fs.readFile(fileUri.fsPath)));
+  const preview = await fixture.prepareCombined();
+  const result = await fixture.invoke({ phase: 'confirm', previewId: preview.previewId, decision: 'approve' });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.sourceStatus, 'completed');
+  assert.equal(result.dependencyStatus, 'completed');
+  assert.equal(result.requests, 1);
+  assert.equal(result.dependencyRequests, 2);
+  assert.equal(result.sourceSnapshotCurrent, true);
+  assert.equal(result.currentDependencySnapshot, true);
+  assert.equal(result.findingCount, 1);
+  assert.equal(fixture.opened(), 1);
+  assert.match(path.basename(result.reportPath), /^codebase-review-/);
+  const report = await fs.readFile(result.reportPath, 'utf8');
+  assert.match(report, /# Codebase Technical Debt And Dependency Report/);
+  assert.match(report, /Simplify a constant expression/);
+  assert.match(report, /Published latest tag: 1\\\.2\\\.0/);
+  assert.match(report, /Use a newer release/);
+  assert.match(report, /Published Advisory Evidence/);
+  assert.match(report, /- \[ \] Reviewed and validated/);
+  assert.deepEqual(await Promise.all(fixture.sourceFiles.map((fileUri) => fs.readFile(fileUri.fsPath))), before);
+});
+
+test('changed dependency input after combined preparation blocks both transfer types', async (context) => {
+  const fixture = await combinedToolFixture(context);
+  const preview = await fixture.prepareCombined();
+  await fs.appendFile(path.join(fixture.projectRoot, 'package.json'), '\n');
+  const result = await fixture.invoke({ phase: 'confirm', previewId: preview.previewId, decision: 'approve' });
+  assert.equal(result.status, 'stale');
+  assert.equal(result.requests, 0);
+  assert.equal(result.dependencyRequests, 0);
+  assert.equal(fixture.state.requests, 0);
+  assert.equal(fixture.calls.length, 0);
+});
+
+test('dependency changes during source analysis leave a combined historical section with zero metadata sends', async (context) => {
+  const fixture = await combinedToolFixture(context, async (chunk) => {
+    await fs.appendFile(path.join(chunk.root ?? fixture.projectRoot, 'package.json'), '\n');
+    return { findings: [] };
+  });
+  const preview = await fixture.prepareCombined();
+  const result = await fixture.invoke({ phase: 'confirm', previewId: preview.previewId, decision: 'approve' });
+  assert.equal(result.status, 'incomplete');
+  assert.equal(result.sourceStatus, 'completed');
+  assert.equal(result.dependencyStatus, 'stale');
+  assert.equal(result.dependencyRequests, 0);
+  assert.equal(fixture.calls.length, 0);
+  assert.equal(result.currentDependencySnapshot, false);
+  assert.match(await fs.readFile(result.reportPath, 'utf8'), /historical only/);
+});
+
+test('source-only scans never call dependency providers', async (context) => {
+  const fixture = await combinedToolFixture(context);
+  const result = await fixture.approve();
+  assert.equal(result.dependencyStatus, undefined);
+  assert.equal(result.dependencyRequests, 0);
+  assert.equal(fixture.calls.length, 0);
+    assert.match(await fs.readFile(result.reportPath, 'utf8'), /Not assessed\. This review did not include npm dependency evidence/);
+});
+
+test('transform review is approvable only when source and dependency snapshots are complete and current', async (context) => {
+  const fixture = await scanToolFixture(context, 1);
+  const manifest = { name: 'sample', version: '1.0.0' };
+  await fs.writeFile(path.join(fixture.projectRoot, 'package.json'), JSON.stringify(manifest));
+  await fs.writeFile(path.join(fixture.projectRoot, 'package-lock.json'), JSON.stringify({
+    name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true,
+    packages: { '': { name: manifest.name, version: manifest.version } }
+  }));
+  fixture.sourceFiles.push(uri(path.join(fixture.projectRoot, 'package.json')),
+    uri(path.join(fixture.projectRoot, 'package-lock.json')));
+  const tool = new TransformCodebaseTool(fixture.vscode, fixture.store, new ProposalStore(), fixture.tool.options);
+  const result = JSON.parse((await tool.invoke({ input: { action: 'review', projectRoot: fixture.projectRoot } })).content[0].value);
+  assert.equal(result.status, 'awaiting-approval');
+  assert.equal(result.sourceStatus, 'completed');
+  assert.equal(result.dependencyStatus, 'not-applicable');
+  assert.equal(result.sourceSnapshotCurrent, true);
+  assert.equal(result.dependencySnapshotCurrent, true);
+  const report = await fs.readFile(result.reportPath, 'utf8');
+  assert.match(report, /Source snapshot: matched at final local check/);
+  assert.match(report, /## Transformation Plan/);
+});
+
+test('transform review puts source findings and deprecated npm updates in one report', async (context) => {
+  const fixture = await combinedToolFixture(context);
+  const tool = new TransformCodebaseTool(fixture.vscode, fixture.store, new ProposalStore(), fixture.tool.options);
+  const result = JSON.parse((await tool.invoke({ input: { action: 'review', projectRoot: fixture.projectRoot } })).content[0].value);
+  assert.equal(result.status, 'awaiting-approval');
+  assert.equal(result.sourceStatus, 'completed');
+  assert.equal(result.dependencyStatus, 'completed');
+  assert.deepEqual(result.dependencyUpdates, [{ name: 'alpha', from: '1.0.0', version: '1.2.0', reason: 'deprecated' }]);
+  const report = await fs.readFile(result.reportPath, 'utf8');
+  assert.match(report, /Simplify a constant expression/);
+  assert.match(report, /`alpha` 1\.0\.0 -> 1\.2\.0 \(deprecated\)/);
+  assert.match(report, /## Transformation Plan/);
+});
+
+test('transform review blocks approval after invalid model output or a source change', async (context) => {
+  const malformed = await scanToolFixture(context, 1, async () => 'not JSON');
+  const malformedTool = new TransformCodebaseTool(malformed.vscode, malformed.store, new ProposalStore(), malformed.tool.options);
+  const incomplete = JSON.parse((await malformedTool.invoke({ input: {
+    action: 'review', projectRoot: malformed.projectRoot
+  } })).content[0].value);
+  assert.equal(incomplete.status, 'incomplete');
+  assert.equal(incomplete.reviewId, undefined);
+  assert.match(await fs.readFile(incomplete.reportPath, 'utf8'), /cannot be applied/);
+
+  let projectRoot;
+  const changed = await scanToolFixture(context, 1, async (chunk) => {
+    await fs.writeFile(path.join(projectRoot, chunk.path), 'function sample() { return 42; }\n');
+    return { findings: [] };
+  });
+  projectRoot = changed.projectRoot;
+  const changedTool = new TransformCodebaseTool(changed.vscode, changed.store, new ProposalStore(), changed.tool.options);
+  const stale = JSON.parse((await changedTool.invoke({ input: {
+    action: 'review', projectRoot: changed.projectRoot
+  } })).content[0].value);
+  assert.equal(stale.status, 'incomplete');
+  assert.equal(stale.sourceSnapshotCurrent, false);
+  assert.equal(stale.reviewId, undefined);
+});
 
 test('scan tool continues approved batches with cumulative reports and retained finding decisions', async (context) => {
   const fixture = await scanToolFixture(context);
@@ -165,8 +344,39 @@ test('scan reports JSON decoding separately from request failure without echoing
   assert.equal(result.chunksReviewed, 0);
   const report = await fs.readFile(result.reportPath, 'utf8');
   assert.match(report, /Model response is not valid JSON/);
+  assert.match(report, /one JSON object that matches the requested schema/);
   assert.match(report, /Model request failed or response exceeded its size limit/);
   assert.doesNotMatch(report, /private-response-text|private-provider-error/);
+});
+
+test('scan accepts one fenced JSON finding and still validates its exact source span', async (context) => {
+  const sourceLine = 'function sample() { return 0 + 1; }';
+  const response = { findings: [{ category: 'redundant-control-flow',
+    rationale: 'The else follows a returning branch; remove it to reduce nesting.', confidence: 'high', symbol: 'sample',
+    functionStartLine: 1, functionEndLine: 1, startLine: 1, startCharacter: 0,
+    endLine: 1, endCharacter: sourceLine.length, originalText: sourceLine,
+    replacementText: 'function sample() { return 1; }' }] };
+  const fixture = await scanToolFixture(context, 1, async () => `\`\`\`json\n${JSON.stringify(response)}\n\`\`\``);
+  const result = await fixture.approve();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.findingCount, 1);
+  assert.equal(result.rejected, 0);
+  assert.equal(fixture.store.list()[0].category, 'redundant-control-flow');
+});
+
+test('scan accepts one JSON finding object surrounded by model prose and validates its exact source span', async (context) => {
+  const sourceLine = 'function sample() { return 0 + 1; }';
+  const response = { findings: [{ category: 'redundant-control-flow',
+    rationale: 'The else follows a returning branch; remove it to reduce nesting.', confidence: 'high', symbol: 'sample',
+    functionStartLine: 1, functionEndLine: 1, startLine: 1, startCharacter: 0,
+    endLine: 1, endCharacter: sourceLine.length, originalText: sourceLine,
+    replacementText: 'function sample() { return 1; }' }] };
+  const fixture = await scanToolFixture(context, 1, async () => `Here is the JSON result:\n${JSON.stringify(response)}\nEnd of response.`);
+  const result = await fixture.approve();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.findingCount, 1);
+  assert.equal(result.rejected, 0);
+  assert.equal(fixture.store.list()[0].category, 'redundant-control-flow');
 });
 
 test('finding rejection reasons distinguish schema, metadata, positions, and exact source mismatch', () => {
@@ -332,6 +542,7 @@ test('inventory admits only root-contained visible source and chunks without exc
   context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
   const sourcePath = path.join(temporaryRoot, 'src', 'sample.js');
   const hiddenPath = path.join(temporaryRoot, '.private', 'secret.ts');
+  const npmConfigPath = path.join(temporaryRoot, '.npmrc');
   const dependencyPath = path.join(temporaryRoot, 'node_modules', 'pkg', 'index.js');
   const packageSourcePath = path.join(temporaryRoot, 'packages', 'app', 'index.ts');
   const unsupportedPath = path.join(temporaryRoot, 'README.md');
@@ -343,6 +554,7 @@ test('inventory admits only root-contained visible source and chunks without exc
   await fs.mkdir(path.dirname(dependencyPath), { recursive: true });
   await fs.mkdir(path.dirname(packageSourcePath), { recursive: true });
   await fs.writeFile(sourcePath, `${'const value = 1;\n'.repeat(4)}`);
+  await fs.writeFile(npmConfigPath, 'registry=https://registry.npmjs.org/');
   await fs.writeFile(hiddenPath, 'const secret = true;');
   await fs.writeFile(dependencyPath, 'module.exports = {};');
   await fs.writeFile(packageSourcePath, 'export const value = 1;\n');
@@ -357,7 +569,7 @@ test('inventory admits only root-contained visible source and chunks without exc
     linkedUri = uri(outsidePath);
   }
 
-  const candidates = [sourcePath, hiddenPath, dependencyPath, packageSourcePath, unsupportedPath].map(uri).concat(linkedUri);
+  const candidates = [sourcePath, hiddenPath, npmConfigPath, dependencyPath, packageSourcePath, unsupportedPath].map(uri).concat(linkedUri);
   const folder = { uri: uri(temporaryRoot) };
   const vscode = {
     RelativePattern: class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } },
@@ -370,9 +582,10 @@ test('inventory admits only root-contained visible source and chunks without exc
   const result = await inventorySourceFiles(vscode, temporaryRoot);
   assert.equal(result.status, 'ready');
   assert.deepEqual(result.files.map((file) => file.path), ['packages/app/index.ts', 'src/sample.js']);
-  assert.equal(result.skipped, 3);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.excluded, 3);
   assert.deepEqual(result.unsupportedFiles, ['README.md']);
-  assert.equal(result.skippedFiles.length, 3);
+  assert.equal(result.skippedFiles.length, 1);
   const bounded = chunkSourceFiles(result.files, 32);
   assert.ok(bounded.chunks.length > 1);
   assert.ok(bounded.chunks.every((chunk) => Buffer.byteLength(chunk.content) <= 32));
@@ -587,8 +800,8 @@ test('scan report shows exact before and after spans and never overwrites an ear
   assert.match(report, /Lines: 12-14/);
   assert.match(report, /Before:/);
   assert.match(report, /After \(model suggestion, unverified\):/);
-  assert.match(report, /one exact-write preview per file/);
-  assert.match(report, /No second model request or report is needed/);
+  assert.match(report, /Review the Transformation Plan before approving it/);
+  assert.doesNotMatch(report, /one exact-write preview per file|No second model request or report is needed/);
   assert.match(report, /Dependency Recommendations[\s\S]*Not assessed/);
   assert.match(report, /Incomplete\./);
   assert.match(report, /Source changes: none/);

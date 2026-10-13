@@ -7,10 +7,11 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ApplyProposalTool, GenerateProposalTool, ReviewFindingsTool, registerApplyProposalTool, registerBehaviorCheckTool, registerFindingReviewTool, registerProposalTool, registerScanTool } = require('../src/extension');
+const { ApplyProposalTool, GenerateProposalTool, ReviewFindingsTool, TransformCodebaseTool, UpdateDependenciesTool, registerApplyProposalTool, registerBehaviorCheckTool, registerDependencyAssessmentTool, registerDependencyUpdateTool, registerFindingReviewTool, registerProposalTool, registerScanTool, registerTransformCodebaseTool } = require('../src/extension');
 const { FindingStore } = require('../src/finding-store');
 const { hashSource } = require('../src/workspace-scan');
 const { validateFindingResponse } = require('../src/scan-pipeline');
+const { renderScanReport } = require('../src/scan-report');
 const { applyProposal, applyProposalBatch, captureSourceSnapshot, contentHash, generateProposal, prepareApplyProposal, prepareApplyProposalBatch, prepareProposalRequest, ProposalStore, renderProposalReport } = require('../src/proposal-workflow');
 
 const extensionRoot = path.resolve(__dirname, '..');
@@ -26,8 +27,8 @@ test('package owns one manually invoked Codebase-Level agent and no Targeted wor
   assert.match(agentContent, /^user-invocable: true$/m);
   assert.match(agentContent, /^disable-model-invocation: true$/m);
   assert.match(agentContent, /^agents: \[\]$/m);
-  assert.match(agentContent, /No finding disposition or proposal generation is needed/);
-  assert.match(agentContent, /Do not add an intermediate "approve findings" or "draft proposals" question/);
+  assert.match(agentContent, /action: review/);
+  assert.match(agentContent, /Never apply without an explicit approval reply/);
   assert.doesNotMatch(agentContent, /legacy_code_transformation_demo_/);
   assert.doesNotMatch(manifest.contributes.chatAgents[0].path, /legacy-code-transformation\/extension/);
 });
@@ -44,13 +45,14 @@ test('package and lock names align and every native tool matches the agent allow
     assert.ok(!referenceNames.has(tool.toolReferenceName));
     referenceNames.add(tool.toolReferenceName);
   }
-  assert.equal(manifest.contributes.languageModelTools.length, 5);
+  assert.equal(manifest.contributes.languageModelTools.length, 8);
   const tools = Object.fromEntries(manifest.contributes.languageModelTools.map((tool) => [tool.name, tool]));
   for (const name of [
     'legacy_codebase_transformation_demo_scan_workspace',
     'legacy_codebase_transformation_demo_generate_proposal',
     'legacy_codebase_transformation_demo_apply_proposal',
-    'legacy_codebase_transformation_demo_check_behavior'
+    'legacy_codebase_transformation_demo_check_behavior',
+    'legacy_codebase_transformation_demo_assess_dependencies'
   ]) {
     assert.deepEqual(tools[name].inputSchema.properties.phase.enum, ['prepare', 'confirm']);
   }
@@ -59,6 +61,9 @@ test('package and lock names align and every native tool matches the agent allow
   assert.equal(reviewSchema.properties.approveIds.uniqueItems, true);
   assert.equal(reviewSchema.properties.rejectIds.uniqueItems, true);
   assert.equal(tools.legacy_codebase_transformation_demo_scan_workspace.inputSchema.properties.scanId.type, 'string');
+  assert.equal(tools.legacy_codebase_transformation_demo_scan_workspace.inputSchema.properties.includeDependencies.type, 'boolean');
+  assert.match(tools.legacy_codebase_transformation_demo_scan_workspace.modelDescription, /up to five focused before\/after proposals/);
+  assert.deepEqual(tools.legacy_codebase_transformation_demo_transform_codebase.inputSchema.properties.action.enum, ['review', 'apply']);
   const batchSchema = tools.legacy_codebase_transformation_demo_apply_proposal.inputSchema.properties.proposalIds;
   assert.equal(batchSchema.type, 'array');
   assert.equal(batchSchema.uniqueItems, true);
@@ -69,6 +74,30 @@ test('package and lock names align and every native tool matches the agent allow
   assert.equal(findingSchema.uniqueItems, true);
   assert.equal(findingSchema.minItems, 1);
   assert.equal(findingSchema.maxItems, 30);
+  const dependencySchema = tools.legacy_codebase_transformation_demo_assess_dependencies.inputSchema;
+  assert.equal(dependencySchema.additionalProperties, false);
+  assert.deepEqual(dependencySchema.oneOf[0].required, ['projectRoot']);
+  assert.deepEqual(dependencySchema.oneOf[1].required, ['previewId', 'decision']);
+  assert.deepEqual(dependencySchema.oneOf[1].not.required, ['projectRoot']);
+  assert.deepEqual(dependencySchema.oneOf[0].not.anyOf.map((entry) => entry.required), [['previewId'], ['decision']]);
+  const updateTool = tools.legacy_codebase_transformation_demo_update_dependencies;
+  assert.deepEqual(updateTool.inputSchema.properties.phase.enum, ['prepare', 'resolve', 'apply']);
+  assert.equal(updateTool.inputSchema.properties.updates.maxItems, 20);
+  assert.match(updateTool.modelDescription, /--package-lock-only/);
+  const transformTool = tools.legacy_codebase_transformation_demo_transform_codebase;
+  assert.deepEqual(transformTool.inputSchema.properties.action.enum, ['review', 'apply']);
+  assert.match(transformTool.modelDescription, /one report/i);
+  assert.match(agentContent, /Use only `legacy_codebase_transformation_demo_transform_codebase`/);
+  assert.match(agentContent, /Approve or reject this report/);
+  assert.doesNotMatch(agentContent, /sharing preview|Apply Selected npm Version Updates/);
+});
+
+test('scan report uses the report approval workflow instead of legacy per-finding gates', () => {
+  const report = renderScanReport({ status: 'completed', root: '/sample', findings: [], files: 0, bytes: 0,
+    filesReviewed: 0, sharedBytes: 0, requests: 0, projectedRequests: 0, batchNumber: 1,
+    reviewedChunks: [], remainingChunks: 0, canContinue: false, scanId: 'scan-id' });
+  assert.match(report, /Review the Transformation Plan before approving it/);
+  assert.doesNotMatch(report, /Select finding IDs|exact-write preview|source-sharing preview/);
 });
 
 test('native registrations are package-local and own one shared finding store', () => {
@@ -86,9 +115,12 @@ test('native registrations are package-local and own one shared finding store', 
   registerProposalTool(vscode, context, store, proposalStore);
   registerApplyProposalTool(vscode, context, store, proposalStore);
   registerBehaviorCheckTool(vscode, context, proposalStore);
+  registerDependencyAssessmentTool(vscode, context);
+  registerDependencyUpdateTool(vscode, context);
+  registerTransformCodebaseTool(vscode, context, store, proposalStore);
   assert.deepEqual(registrations.map(({ name }) => name).sort(),
     manifest.contributes.languageModelTools.map(({ name }) => name).sort());
-  assert.ok(registrations.filter(({ name }) => !name.endsWith('_generate_proposal') && !name.endsWith('_apply_proposal') && !name.endsWith('_check_behavior'))
+  assert.ok(registrations.filter(({ name }) => !name.endsWith('_generate_proposal') && !name.endsWith('_apply_proposal') && !name.endsWith('_check_behavior') && !name.endsWith('_assess_dependencies') && !name.endsWith('_update_dependencies') && !name.endsWith('_transform_codebase'))
     .every(({ tool }) => tool.store === store));
   const proposal = registrations.find(({ name }) => name === 'legacy_codebase_transformation_demo_generate_proposal');
   assert.equal(proposal.tool.findingStore, store);
@@ -98,7 +130,17 @@ test('native registrations are package-local and own one shared finding store', 
   assert.equal(apply.tool.proposalStore, proposalStore);
   const behavior = registrations.find(({ name }) => name.endsWith('_check_behavior'));
   assert.equal(behavior.tool.proposalStore, proposalStore);
-  assert.equal(context.subscriptions.length, 5);
+  const dependency = registrations.find(({ name }) => name.endsWith('_assess_dependencies'));
+  const dependencyUpdate = registrations.find(({ name }) => name.endsWith('_update_dependencies'));
+  const transform = registrations.find(({ name }) => name.endsWith('_transform_codebase'));
+  assert.ok(transform.tool instanceof TransformCodebaseTool);
+  assert.equal(transform.tool.findingStore, store);
+  assert.equal(transform.tool.proposalStore, proposalStore);
+  assert.ok(dependencyUpdate.tool instanceof UpdateDependenciesTool);
+  assert.equal(dependency.tool.store, undefined);
+  assert.equal(dependency.tool.findingStore, undefined);
+  assert.equal(dependency.tool.proposalStore, undefined);
+  assert.equal(context.subscriptions.length, 8);
 });
 
 async function approvedFinding(context) {

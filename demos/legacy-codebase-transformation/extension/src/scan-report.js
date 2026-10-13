@@ -61,14 +61,20 @@ function renderFinding(finding, index) {
 function renderScanReport(result) {
   const files = [...new Set((result.findings ?? []).map((finding) => finding.path))].sort();
   const findings = result.findings ?? [];
-  const coverage = result.status === 'completed' ? 'All eligible source chunks were reviewed. Unsupported and excluded files are outside this coverage.' :
-    result.status === 'incomplete' ? 'Incomplete. Review skipped files, rejected outputs, and unscanned chunks before drawing conclusions.' :
+  const sourceStatus = result.sourceStatus ?? result.status;
+  const coverage = sourceStatus === 'completed' ? 'All eligible source chunks were reviewed. Unsupported and excluded files are outside this coverage.' :
+    sourceStatus === 'incomplete' ? 'Incomplete. Review skipped files, rejected outputs, and unscanned chunks before drawing conclusions.' :
       'No complete scan result is available.';
   const summary = [
-    '# Codebase Refactoring Scan Report',
+    result.dependencies ? '# Codebase Technical Debt And Dependency Report' : '# Codebase Refactoring Scan Report',
     '',
     `Generated: ${new Date().toISOString()}`,
     `Status: ${escapeMarkdown(result.status)}`,
+    ...(result.dependencies ? [
+      `Source analysis status: ${escapeMarkdown(sourceStatus)}`,
+      `Source snapshot: ${result.sourceSnapshotCurrent ? 'matched at final local check' : 'changed, dirty or unchecked; findings are historical only'}`,
+      `Dependency status: ${escapeMarkdown(result.dependencies.status)}; actual HTTP attempts: ${result.dependencies.requests}`
+    ] : []),
     'Human review: pending',
     'Source changes: none',
     `Workspace root: ${inlineCode(result.root ?? 'unavailable')}`,
@@ -83,10 +89,11 @@ function renderScanReport(result) {
     `Scan ID: ${inlineCode(result.scanId ?? 'unavailable')}`,
     `Findings: ${findings.length}`,
     `Files with proposed spans: ${files.length}`,
+    `Paths excluded by scan policy (observed): ${result.excluded ?? 0}`,
     `Skipped files or chunks: ${result.skipped ?? 0}`,
     `Rejected model outputs or requests: ${result.rejected ?? 0}`,
     '',
-    'Each listed location is a proposed replacement span, not an applied change. Before and after snippets are unverified model output. Select finding IDs to apply these existing suggestions: the agent prepares one exact-write preview per file, then waits for your approval. No second model request or report is needed. Custom refactors require separate proposal source-sharing approval.',
+    'Source suggestions are unverified model output. Review the Transformation Plan before approving it. No source or dependency changes have been made, and tests are not run.',
     '',
     '## Proposed File Changes',
     '',
@@ -98,7 +105,9 @@ function renderScanReport(result) {
     '',
     '## Dependency Recommendations',
     '',
-    'Not assessed. This scan inventories supported source files only and does not inspect dependency manifests or lockfiles. It cannot provide evidence-backed dependency recommendations.',
+    result.dependencies ? require('./dependency-report').renderDependencyReport(result.dependencies)
+      .split('\n').map((line) => /^#{1,3} /.test(line) ? `##${line}` : line).join('\n') :
+      'Not assessed. This review did not include npm dependency evidence.',
     '',
     '## Coverage And Limitations',
     '',
@@ -120,7 +129,7 @@ function renderScanReport(result) {
       `* ${inlineCode(chunk.path)} from line ${chunk.startLine}: ${escapeMarkdown(chunk.reason)}`).join('\n') : 'None recorded.',
     '',
     'Coverage is source-text analysis, not whole-program semantic analysis. Line-based chunks may split functions. Failed or rejected chunks require a fresh scan; exhausting the queue does not make failed analysis complete.',
-    'This report covers bounded readability and maintainability findings only. It does not establish correctness, security, behavior preservation, build success, or test success. Project commands and tests were not run.'
+    'This report contains best-effort, evidence-backed technical-debt suggestions for eligible source. A completed scan means every eligible chunk was reviewed, not that every issue was found. Suggestions do not establish correctness, security, behavior preservation, build success, or test success. Project commands and tests were not run.'
   ];
   return summary.join('\n');
 }
@@ -137,4 +146,4 @@ async function writeScanReport(reportDirectory, scanId, markdown, batchNumber = 
   return reportPath;
 }
 
-module.exports = { renderScanReport, writeScanReport };
+module.exports = { escapeMarkdown, renderScanReport, writeScanReport };

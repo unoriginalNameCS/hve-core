@@ -1,0 +1,6 @@
+[
+  { "id": "ORD-1001", "region": "North", "amount": 19.95 },
+  { "id": "ORD-1002", "region": "South", "amount": 12.50 },
+  { "id": "ORD-1003", "region": "North", "amount": 35.50 },
+  { "id": "ORD-1004", "region": "South", "amount": 44.00 }
+]
