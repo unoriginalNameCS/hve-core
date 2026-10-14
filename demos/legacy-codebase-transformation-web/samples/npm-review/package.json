@@ -1,0 +1,12 @@
+{
+  "name": "npm-review-sample",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"const fs=require('node:fs');const path=require('node:path');const _=require('lodash');const mkdirp=require('mkdirp');if(!_.isFinite(1)||!(typeof mkdirp==='function'||typeof mkdirp.mkdirp==='function'))process.exit(1);fs.mkdirSync(path.join(process.cwd(),'dist'),{recursive:true});fs.writeFileSync(path.join(process.cwd(),'dist','build.txt'),'sample build succeeded\\n')\""
+  },
+  "dependencies": {
+    "lodash": "4.17.20",
+    "mkdirp": "0.5.1"
+  }
+}

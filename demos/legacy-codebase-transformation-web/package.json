@@ -1,0 +1,28 @@
+{
+  "name": "legacy-codebase-transformation-web-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone React and Microsoft Foundry demo for approval-gated codebase transformations.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env ./node_modules/vite/bin/vite.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/start.js",
+    "test": "node --test",
+    "check": "node --check server/analysis.js && node --check server/foundry-client.js && node --check server/dependency-review.js && node --check server/dependency-build.js && node --check server/workflow.js && node --check server/api.js && node --check server/start.js"
+  },
+  "dependencies": {
+    "archiver": "7.0.1",
+    "busboy": "1.6.0",
+    "express": "5.1.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "semver": "7.7.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "5.0.2",
+    "vite": "7.3.7"
+  }
+}
