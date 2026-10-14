@@ -1,7 +1,13 @@
 'use strict';
 
-const { chunkSourceFiles, scanPrompt } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
+const { chunkSourceFiles, scanPrompt: buildSharedScanPrompt } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
 const { validateFindingResponse } = require('../../legacy-codebase-transformation/extension/src/scan-pipeline');
+
+function scanPrompt(chunk, remainingFindings) {
+  const prompt = JSON.parse(buildSharedScanPrompt(chunk, remainingFindings));
+  prompt.instructions += ' When a function has several levels of nested conditionals that determine its outcome, prioritize one safe whole-function simplification that removes the nesting over a tiny local cleanup. If behavior can be preserved, set originalText to the exact complete function and replacementText to a shorter complete replacement. Keep the change to one function and omit it if you cannot verify the behavior-preserving replacement.';
+  return JSON.stringify(prompt);
+}
 
 function recoverFindingCoordinates(candidate, content) {
   if (typeof candidate?.originalText !== 'string' || !candidate.originalText) return null;

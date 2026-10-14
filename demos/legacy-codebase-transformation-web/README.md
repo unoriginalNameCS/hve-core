@@ -74,6 +74,14 @@ demos/legacy-codebase-transformation-web/samples/order-desk
 
 This Node.js order desk app has separate order-report and catalog-search modules plus direct dependencies pinned to deprecated versions of `mkdirp` and `uuid`. From the sample folder, run `npm ci` and `npm start` to see its output. Select the `order-desk` folder in the demo, inspect the disclosed source and package identifiers, and approve the combined analysis. The intentionally nested `buildOrderReport` and repetitive `searchCatalog` functions are source-refactoring candidates; the dependency panel shows the deprecation notices and update candidates. Selecting updates exposes the package/lockfile diff and the app's `npm run build` command for explicit approval.
 
+For the most visually obvious source-only transformation, use:
+
+```text
+demos/legacy-codebase-transformation-web/samples/dispatch-desk
+```
+
+This small Node.js CLI has one roughly 25-line `summarizeDispatch` function with deeply nested request, status, destination, and package validation branches. The web scan prompt prioritizes a whole-function simplification for this kind of target. Run the sample with `npm start`, then select the `dispatch-desk` folder in the demo and approve source analysis. Compare the full function in the report to see whether the model produces the shorter guard-clause replacement. This source-only sample has no dependencies to update.
+
 <details>
 <summary>How each step works: inputs, outputs, and tools</summary>
 

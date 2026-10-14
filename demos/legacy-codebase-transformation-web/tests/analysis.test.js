@@ -20,7 +20,9 @@ test('uploaded source uses the existing chunker and prompt contract', () => {
 
   assert.equal(chunks.length, 1);
   assert.equal(chunks[0].content, source);
-  assert.match(scanPrompt({ ...chunks[0], scanId: 'scan-1' }, 5), /untrusted data/);
+  const prompt = scanPrompt({ ...chunks[0], scanId: 'scan-1' }, 5);
+  assert.match(prompt, /untrusted data/);
+  assert.match(prompt, /prioritize one safe whole-function simplification/);
 });
 
 test('uploaded findings must match an exact source span before review', () => {

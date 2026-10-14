@@ -1,0 +1,9 @@
+{
+  "name": "dispatch-desk-sample",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small dispatch quote app with one intentionally overgrown function for transformation demos.",
+  "scripts": {
+    "start": "node src/index.js"
+  }
+}
