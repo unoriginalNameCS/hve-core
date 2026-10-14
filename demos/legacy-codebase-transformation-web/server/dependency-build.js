@@ -152,15 +152,17 @@ function runNpm(args, cwd, stage, options = {}) {
 async function writeProjectFiles(files, rootName, tempRoot) {
   const projectRoot = path.join(tempRoot, rootName);
   await fs.mkdir(projectRoot, { recursive: true, mode: 0o700 });
+  const controlledConfigs = ['.npmrc', 'user.npmrc', 'global.npmrc'];
   for (const [relativePath, content] of files) {
     const parts = relativePath.split('/');
     if (parts[0] !== rootName || parts.some((part) => !part || part === '.' || part === '..')) throw fault('invalid-path');
+    if (parts.length === 2 && controlledConfigs.includes(parts[1].toLowerCase())) continue;
     const target = path.resolve(tempRoot, ...parts);
     if (!target.startsWith(`${path.resolve(tempRoot)}${path.sep}`)) throw fault('invalid-path');
     await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     await fs.writeFile(target, content, { flag: 'wx', mode: 0o600 });
   }
-  for (const config of ['.npmrc', 'user.npmrc', 'global.npmrc']) {
+  for (const config of controlledConfigs) {
     await fs.writeFile(path.join(projectRoot, config), '', { flag: 'wx', mode: 0o600 });
   }
   return projectRoot;

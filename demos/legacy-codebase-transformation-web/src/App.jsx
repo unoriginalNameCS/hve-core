@@ -598,8 +598,7 @@ export default function App() {
               <div className="review-actions">
                 <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject review</button>
                 <button className="button button-primary" type="button" onClick={applySelected}
-                  disabled={(!review.complete && !(selectedUpdates.size > 0 && review.dependencyAssessment?.status === 'completed')) ||
-                    (selected.size === 0 && selectedUpdates.size === 0) || busy !== ''}>
+                  disabled={(selected.size === 0 && selectedUpdates.size === 0) || busy !== ''}>
                   {busy === 'apply' ? 'Applying…' : busy === 'update-prepare' ? 'Resolving update…' : selectedUpdates.size > 0 ?
                     `Resolve ${selectedUpdates.size} update${selectedUpdates.size === 1 ? '' : 's'}` :
                     `Approve ${selected.size} and transform`}
@@ -609,7 +608,7 @@ export default function App() {
 
             {review.sourceStatus === 'not-approved' && <p className="local-note">Source analysis was not approved. npm evidence is shown separately when available.</p>}
             {review.sourceStatus === 'not-applicable' && <p className="local-note">No supported source files were found, so no Foundry request was made.</p>}
-            {review.sourceStatus === 'incomplete' && <p className="alert">Some source chunks could not be validated. Source changes cannot be applied.</p>}
+            {review.sourceStatus === 'incomplete' && <p className="alert">Some source proposals could not be validated and were excluded. You can approve the validated findings below; analysis coverage is incomplete.</p>}
             {review.sourceFailures.map((failure, index) => (
               <p className="failure-line" key={`${failure.path}-${index}`}>{failure.path}: {failure.reason}</p>
             ))}
@@ -620,7 +619,7 @@ export default function App() {
               {review.findings.map((finding, index) => (
                 <article className={`finding ${selected.has(finding.id) ? 'selected' : ''}`} key={finding.id}>
                   <label className="finding-select">
-                    <input type="checkbox" checked={selected.has(finding.id)} onChange={() => toggleFinding(finding.id)} disabled={!review.complete || busy !== ''} />
+                    <input type="checkbox" checked={selected.has(finding.id)} onChange={() => toggleFinding(finding.id)} disabled={busy !== ''} />
                     <span className="checkmark" aria-hidden="true" />
                     <span className="finding-number">{String(index + 1).padStart(2, '0')}</span>
                   </label>

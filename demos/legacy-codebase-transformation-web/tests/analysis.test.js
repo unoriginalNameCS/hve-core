@@ -42,4 +42,35 @@ test('uploaded findings must match an exact source span before review', () => {
   const rejected = validateUploadedFinding({ findings: [{ ...candidate, originalText: 'invented source text' }] }, chunk);
   assert.equal(rejected.findings.length, 0);
   assert.equal(rejected.rejections.length, 1);
+
+  const unchanged = validateUploadedFinding({ findings: [{ ...candidate, replacementText: candidate.originalText }] }, chunk);
+  assert.equal(unchanged.findings.length, 0);
+  assert.match(unchanged.rejections[0], /replacementText is unchanged from originalText/);
+});
+
+test('uploaded findings recover invalid coordinates only when original text is unique', () => {
+  const chunk = {
+    scanId: 'scan-1', path: 'src/readiness.js', sourceHash: 'hash', startLine: 1, content: source
+  };
+  const candidate = {
+    category: 'redundant-control-flow', rationale: 'The branch returns booleans directly.', confidence: 'high',
+    symbol: 'isReady', functionStartLine: 500, functionEndLine: 600, startLine: 501, startCharacter: 100,
+    endLine: 505, endCharacter: 100,
+    originalText: 'if (value) {\n    return true;\n  } else {\n    return false;\n  }',
+    replacementText: 'return Boolean(value);'
+  };
+
+  const recovered = validateUploadedFinding({ findings: [candidate] }, chunk);
+  assert.equal(recovered.findings.length, 1);
+  assert.deepEqual(recovered.findings[0].range, {
+    startLine: 2, startCharacter: 2, endLine: 6, endCharacter: 3
+  });
+  assert.deepEqual(recovered.rejections, []);
+
+  const repeatedText = source.replace('    return false;', '    return true;');
+  const ambiguous = validateUploadedFinding({ findings: [{ ...candidate, originalText: 'return true;' }] }, {
+    ...chunk, content: repeatedText
+  });
+  assert.equal(ambiguous.findings.length, 0);
+  assert.ok(ambiguous.rejections.some((reason) => reason.includes('did not identify one unique source span')));
 });

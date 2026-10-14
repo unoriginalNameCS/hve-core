@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { once } = require('node:events');
+const { inflateRawSync } = require('node:zlib');
 const test = require('node:test');
 const { createApiApp } = require('../server/api');
 const { getSession, removeSession } = require('../server/workflow');
@@ -23,6 +24,34 @@ const candidate = {
   originalText: 'if (value) {\n    return true;\n  } else {\n    return false;\n  }',
   replacementText: 'return Boolean(value);'
 };
+
+function readZipEntry(zip, targetName) {
+  const endRecord = zip.lastIndexOf(Buffer.from('504b0506', 'hex'));
+  assert.notEqual(endRecord, -1, 'ZIP end-of-central-directory record is missing');
+  let directoryOffset = zip.readUInt32LE(endRecord + 16);
+  const entryCount = zip.readUInt16LE(endRecord + 10);
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    assert.equal(zip.readUInt32LE(directoryOffset), 0x02014b50, 'ZIP central directory entry is invalid');
+    const compression = zip.readUInt16LE(directoryOffset + 10);
+    const compressedSize = zip.readUInt32LE(directoryOffset + 20);
+    const nameLength = zip.readUInt16LE(directoryOffset + 28);
+    const extraLength = zip.readUInt16LE(directoryOffset + 30);
+    const commentLength = zip.readUInt16LE(directoryOffset + 32);
+    const localOffset = zip.readUInt32LE(directoryOffset + 42);
+    const name = zip.toString('utf8', directoryOffset + 46, directoryOffset + 46 + nameLength);
+    if (name === targetName) {
+      const localNameLength = zip.readUInt16LE(localOffset + 26);
+      const localExtraLength = zip.readUInt16LE(localOffset + 28);
+      const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+      const compressed = zip.subarray(dataOffset, dataOffset + compressedSize);
+      if (compression === 0) return compressed.toString('utf8');
+      if (compression === 8) return inflateRawSync(compressed).toString('utf8');
+      throw new Error(`Unsupported ZIP compression method ${compression}.`);
+    }
+    directoryOffset += 46 + nameLength + extraLength + commentLength;
+  }
+  throw new Error(`ZIP entry not found: ${targetName}`);
+}
 
 test('folder upload requires approval before returning an applied ZIP', async (context) => {
   const app = createApiApp({
@@ -236,13 +265,53 @@ test('projects with source and npm dependencies require one combined approval an
 test('selected dependency update shows lock diff and builds only after exact command approval', async (context) => {
   const dependencyCommands = [];
   const buildCommands = [];
+  const sourceText = [
+    'function isReady(value) {',
+    '  if (value) {',
+    '    return true;',
+    '  } else {',
+    '    return false;',
+    '  }',
+    '}',
+    'function isEnabled(value) {',
+    '  if (value) {',
+    '    return true;',
+    '  } else {',
+    '    return false;',
+    '  }',
+    '}',
+    'module.exports = { isReady, isEnabled };',
+    ''
+  ].join('\n');
+  const sourceFinding = {
+    ...candidate,
+    symbol: 'isReady',
+    functionEndLine: 7,
+    endLine: 6,
+    originalText: 'if (value) {\n    return true;\n  } else {\n    return false;\n  }',
+    replacementText: 'return Boolean(value);'
+  };
+  const secondSourceFinding = {
+    ...sourceFinding,
+    symbol: 'isEnabled',
+    functionStartLine: 8,
+    functionEndLine: 14,
+    startLine: 9,
+    endLine: 13
+  };
   const app = createApiApp({
     env: {
       FOUNDRY_API_KEY: 'test-key',
       FOUNDRY_ENDPOINT: 'https://sample.services.ai.azure.com',
       FOUNDRY_MODEL: 'gpt-4.1-mini'
     },
-    requestFindings: async () => ({ findings: [{ category: 'invalid-model-finding' }] }),
+    requestFindings: async (prompt) => {
+      const promptJson = prompt.split('\n\nValidation feedback:')[0];
+      const { source } = JSON.parse(promptJson);
+      if (source.path !== 'sample/src/main.js') return { findings: [] };
+      return { findings: [sourceFinding, secondSourceFinding,
+        { ...sourceFinding, originalText: '', replacementText: '' }] };
+    },
     metadataFetchImpl: async (url) => {
       if (url === 'https://api.osv.dev/v1/query') return new Response(JSON.stringify({ vulns: [] }), { status: 200 });
       const name = decodeURIComponent(new URL(url).pathname.slice(1));
@@ -283,7 +352,6 @@ test('selected dependency update shows lock diff and builds only after exact com
   });
   await once(server, 'listening');
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
-  const sourceText = "'use strict';\nconst _ = require('lodash');\nmodule.exports = _.sum([1, 2]);\n";
   const packageManifest = {
     name: 'sample', version: '1.0.0', private: true, scripts: { build: 'node scripts/build.js' },
     dependencies: { lodash: '4.17.20', mkdirp: '0.5.1' }
@@ -317,11 +385,13 @@ test('selected dependency update shows lock diff and builds only after exact com
   assert.equal(analysisResponse.status, 200);
   assert.equal(analysis.complete, false);
   assert.equal(analysis.sourceStatus, 'incomplete');
+  assert.equal(analysis.findings.length, 2);
+  assert.equal(analysis.sourceFailures.length, 1);
   assert.equal(analysis.dependencyAssessment.inventory.buildAvailable, true);
   assert.equal(analysis.dependencyAssessment.inventory.buildScript, 'node scripts/build.js');
   const updateResponse = await fetch(`${baseUrl}/api/sessions/${prepared.sessionId}/updates/prepare`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approvedFindingIds: [], selectedUpdateNames: ['mkdirp'] })
+    body: JSON.stringify({ approvedFindingIds: analysis.findings.map((finding) => finding.id), selectedUpdateNames: ['mkdirp'] })
   });
   const update = await updateResponse.json();
   assert.equal(updateResponse.status, 200);
@@ -344,11 +414,21 @@ test('selected dependency update shows lock diff and builds only after exact com
   assert.equal(buildResponse.status, 200);
   assert.equal(build.status, 'passed');
   assert.equal(build.tests, 'not run');
+  assert.equal(build.summary.findings, 2);
   assert.deepEqual(buildCommands.map((call) => call.stage), ['install', 'build']);
   assert.ok(buildCommands[0].args.includes('--ignore-scripts'));
   assert.deepEqual(buildCommands[1].args.slice(0, 4), ['npm', '--ignore-scripts', 'run', 'build']);
   const session = getSession(prepared.sessionId);
   assert.equal(JSON.parse(session.files.get('sample/package.json').toString()).dependencies.mkdirp, '3.0.1');
+  const expectedSource = sourceText.replace(sourceFinding.originalText, sourceFinding.replacementText)
+    .replace(secondSourceFinding.originalText, secondSourceFinding.replacementText);
+  assert.equal(session.files.get('sample/src/main.js').toString(), expectedSource);
+
+  const downloadResponse = await fetch(`${baseUrl}/api/sessions/${prepared.sessionId}/download`);
+  const zip = Buffer.from(await downloadResponse.arrayBuffer());
+  assert.equal(downloadResponse.status, 200);
+  assert.equal(readZipEntry(zip, 'sample/src/main.js'), expectedSource);
+  assert.match(readZipEntry(zip, 'TRANSFORMATION-REPORT.md'), /return Boolean\(value\);/);
   for (const [index, fileName] of names.entries()) assert.deepEqual(originals[index], Buffer.from(contents[index]));
   removeSession(prepared.sessionId);
 });

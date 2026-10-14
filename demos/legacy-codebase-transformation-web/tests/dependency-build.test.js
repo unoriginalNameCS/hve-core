@@ -83,9 +83,17 @@ test('update preview resolves only selected direct candidates and shows lock cha
 
 test('approved build installs without lifecycle scripts and returns staged files only on success', async () => {
   const sample = updateFixture();
+  for (const config of ['.npmrc', 'user.npmrc', 'global.npmrc']) {
+    sample.files.set(`sample/${config}`, Buffer.from('ignore-scripts=false\n'));
+  }
   const calls = [];
   const preview = await prepareDependencyBuild(sample, ['mkdirp'], { runCommand: resolvingRunner(calls) });
-  const build = await runApprovedBuild(preview, { runCommand: resolvingRunner(calls) });
+  const build = await runApprovedBuild(preview, { runCommand: async (command) => {
+    for (const config of ['.npmrc', 'user.npmrc', 'global.npmrc']) {
+      assert.equal(await fs.readFile(path.join(command.cwd, config), 'utf8'), '');
+    }
+    return resolvingRunner(calls)(command);
+  } });
 
   assert.equal(build.status, 'passed');
   assert.deepEqual(build.tests, 'not run');
@@ -95,6 +103,7 @@ test('approved build installs without lifecycle scripts and returns staged files
   assert.ok(calls[1].args.includes('--ignore-scripts'));
   assert.deepEqual(calls[2].args.slice(0, 4), ['npm', '--ignore-scripts', 'run', 'build']);
   assert.equal(JSON.parse(sample.files.get('sample/package.json').toString()).dependencies.mkdirp, '0.5.1');
+  assert.equal(build.files.get('sample/.npmrc').toString(), 'ignore-scripts=false\n');
 });
 
 test('failed build returns bounded failure without staged output or original changes', async () => {

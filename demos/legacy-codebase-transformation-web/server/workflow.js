@@ -217,10 +217,34 @@ async function analyzePreparedUpload(sessionId, decisions, options = {}) {
     for (const [index, rawChunk] of session.chunks.entries()) {
       const chunk = { ...rawChunk, scanId: session.scanId };
       try {
-        const payload = await requestModel(scanPrompt(chunk, MAX_FINDINGS_PER_REQUEST), {
+        const prompt = scanPrompt(chunk, MAX_FINDINGS_PER_REQUEST);
+        const payload = await requestModel(prompt, {
           config, fetchImpl: options.fetchImpl
         });
-        const validated = validateUploadedFinding(payload, chunk);
+        let validated = validateUploadedFinding(payload, chunk);
+        requests += 1;
+
+        if (validated.rejections.some((reason) => reason.includes('Text validation failed:'))) {
+          try {
+            requests += 1;
+            const feedback = validated.rejections.filter((reason) => reason.includes('Text validation failed:')).join(' ');
+            const retryPayload = await requestModel(`${prompt}\n\nValidation feedback: ${feedback} Reinspect this source chunk. For every finding, originalText must be an exact, nonempty source span and replacementText must be a different, nonempty replacement. Omit a finding if you cannot provide both exactly.`, {
+              config, fetchImpl: options.fetchImpl
+            });
+            const retryValidation = validateUploadedFinding(retryPayload, chunk);
+            const seen = new Set();
+            const retryFindings = [...validated.findings, ...retryValidation.findings].filter((finding) => {
+              const key = JSON.stringify([finding.path, finding.range, finding.originalText, finding.replacementText]);
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+            validated = { findings: retryFindings, rejections: retryValidation.rejections };
+          } catch (error) {
+            sourceFailures.push({ path: chunk.path, startLine: chunk.startLine,
+              reason: error.statusCode ? error.message : 'The model retry failed or did not match the finding contract.' });
+          }
+        }
         if (validated.rejections.length) {
           sourceFailures.push({ path: chunk.path, startLine: chunk.startLine, reason: validated.rejections.join(' ') });
         }
@@ -228,8 +252,8 @@ async function analyzePreparedUpload(sessionId, decisions, options = {}) {
       } catch (error) {
         sourceFailures.push({ path: chunk.path, startLine: chunk.startLine,
           reason: error.statusCode ? error.message : 'The model response failed or did not match the finding contract.' });
+        requests += 1;
       }
-      requests += 1;
       options.onProgress?.({ attempted: index + 1, total: session.chunks.length });
     }
     if (sourceFailures.length) sourceStatus = 'incomplete';
@@ -348,7 +372,7 @@ function buildChangeReport(selected, { updates = [], lockChanges = [], omittedLo
 function applyApprovedFindings(sessionId, approvedFindingIds) {
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
-  if (!session.complete) throw appError('An incomplete analysis cannot be applied.');
+  if (!['completed', 'incomplete'].includes(session.sourceStatus)) throw appError('Source analysis must be approved before applying findings.');
   if (session.applied) throw appError('This review has already been transformed.');
   const prepared = prepareApprovedChanges(session, approvedFindingIds);
   session.files = prepared.files;
@@ -363,8 +387,9 @@ async function prepareApprovedUpdate(sessionId, approvedFindingIds, selectedUpda
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
   if (session.applied) throw appError('This review has already been transformed.');
-  if (!session.complete && (approvedFindingIds?.length > 0 || session.dependencyAssessment?.status !== 'completed')) {
-    throw appError('Only a complete dependency assessment can proceed without source findings.');
+  if (session.dependencyAssessment?.status !== 'completed') throw appError('Only a complete dependency assessment can proceed with updates.');
+  if (approvedFindingIds?.length > 0 && !['completed', 'incomplete'].includes(session.sourceStatus)) {
+    throw appError('Source analysis must be approved before applying findings.');
   }
   const source = prepareApprovedChanges(session, approvedFindingIds, true);
   let prepared;

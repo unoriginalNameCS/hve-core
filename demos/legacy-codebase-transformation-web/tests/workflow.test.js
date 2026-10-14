@@ -57,6 +57,54 @@ test('combined demo sample prepares exactly one source chunk with npm inventory'
   removeSession(preview.sessionId);
 });
 
+test('validated findings remain selectable when another source response is rejected', async () => {
+  const bytes = Buffer.from(source);
+  const preview = prepareUpload([
+    { id: 'file-0', path: 'project/src/first.js', size: bytes.length },
+    { id: 'file-1', path: 'project/src/second.js', size: bytes.length }
+  ], new Map([['file-0', bytes], ['file-1', bytes]]));
+  let requests = 0;
+  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
+    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
+    requestFindings: async () => (++requests === 1 ? { findings: [candidate] } : { findings: [{ ...candidate, originalText: 'not in the source' }] })
+  });
+  assert.equal(review.sourceStatus, 'incomplete');
+  assert.equal(review.complete, false);
+  assert.equal(review.findings.length, 1);
+  assert.equal(review.sourceFailures.length, 1);
+  assert.throws(() => applyApprovedFindings(preview.sessionId, ['rejected']), /unknown finding/);
+  const applied = applyApprovedFindings(preview.sessionId, [review.findings[0].id]);
+  assert.equal(applied.findings, 1);
+  const session = getSession(preview.sessionId);
+  assert.match(session.files.get('project/src/first.js').toString(), /return Boolean\(value\);/);
+  assert.equal(session.files.get('project/src/second.js').toString(), source);
+  removeSession(preview.sessionId);
+});
+
+test('source analysis retries once when the model returns invalid replacement text', async () => {
+  const preview = prepareUpload(
+    [{ id: 'file-0', path: 'project/src/readiness.js', size: Buffer.byteLength(source) }],
+    new Map([['file-0', Buffer.from(source)]])
+  );
+  const prompts = [];
+  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
+    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
+    requestFindings: async (prompt) => {
+      prompts.push(prompt);
+      return { findings: [prompts.length === 1 ? { ...candidate, replacementText: candidate.originalText } : candidate] };
+    }
+  });
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /Validation feedback/);
+  assert.match(prompts[1], /replacementText is unchanged from originalText/);
+  assert.equal(review.complete, true);
+  assert.equal(review.summary.requests, 2);
+  assert.equal(review.sourceFailures.length, 0);
+  assert.equal(review.findings.length, 1);
+  removeSession(preview.sessionId);
+});
+
 test('approval edits only the staged copy and refuses unapproved or repeated writes', async () => {
   const originalBuffer = Buffer.from(source);
   const preview = prepareUpload(
