@@ -82,6 +82,68 @@ demos/legacy-codebase-transformation-web/samples/dispatch-desk
 
 This small Node.js CLI has one roughly 25-line `summarizeDispatch` function with deeply nested request, status, destination, and package validation branches. The web scan prompt prioritizes a whole-function simplification for this kind of target. Run the sample with `npm start`, then select the `dispatch-desk` folder in the demo and approve source analysis. Compare the full function in the report to see whether the model produces the shorter guard-clause replacement. This source-only sample has no dependencies to update.
 
+For another multi-file sample with two smaller refactoring targets, use:
+
+```text
+demos/legacy-codebase-transformation-web/samples/studio-schedule
+```
+
+This six-file fitness studio CLI separates booking decisions, class search, attendance summaries, sample data, and report writing. Run `npm.cmd ci` and `npm.cmd start` from the sample folder, then select `studio-schedule` and approve combined source and dependency analysis. Review the small `summarizeBooking`, `findOpenClasses`, and `summarizeAttendance` functions for straightforward refactoring candidates. The report writer exercises intentionally deprecated `mkdirp@0.5.1` and `uuid@3.4.0`; a root build script and lockfile support the approved dependency-update/build flow. See the [sample guide](samples/studio-schedule/README.md) for expected output and update steps.
+
+## Lifecycle
+
+The diagram shows the implemented workflow. Source and dependency selections share one review action; selecting dependency updates carries any selected source changes into the update preview and approved build.
+
+```mermaid
+flowchart TD
+	Folder["Input: selected project folder"] --> Prepare["1. Prepare local inventory"]
+	Prepare --> Preview["Output: source paths, package identifiers, gaps"]
+	Preview --> Consent{"Approve disclosed transfers?"}
+	Consent -->|No| Stop["Reject review: original folder unchanged"]
+	Consent -->|Yes| Analyze["2. Analyze approved source and npm metadata"]
+	Analyze --> Evidence["Output: validated source proposals and dependency evidence"]
+	Evidence --> Select["3. Review and select changes"]
+	Select --> Route{"Selected dependency updates?"}
+	Route -->|No, source edits selected| Apply["Validate and stage approved source edits"]
+	Apply --> Export["6. Export transformed ZIP and report"]
+	Route -->|Yes, with optional source edits| Resolve["4. Resolve selected versions and lockfile"]
+	Resolve --> Diff["Output: package and lock diff, source count, build command"]
+	Diff --> Approval{"Approve staged update and build execution?"}
+	Approval -->|No| Stop
+	Approval -->|Yes| Build["5. Install and build temporary copy"]
+	Build --> Result{"Install and build exit successfully?"}
+	Result -->|Yes| Export
+	Result -->|No| Failure["Output: failure details; download blocked"]
+	Export --> Download["Output: approved files and TRANSFORMATION-REPORT.md"]
+```
+
+### Stage Success Criteria
+
+| Stage | Input | Output | Success criterion |
+|-------|-------|--------|-------------------|
+| 1. Prepare | Selected folder and uploaded bytes | Local inventory, transfer disclosure, coverage gaps, build availability | Accepted files have validated relative paths and stay within upload limits; no analysis-service request occurs before consent. |
+| 2. Analyze | Approved source and package identifiers | Validated source proposals, npm/OSV evidence, explicit failures or gaps | Only approved transfers occur; invalid source proposals are excluded and incomplete coverage remains visible. No findings is not proof that the project needs no changes. |
+| 3. Select and stage source | Explicitly selected finding IDs | Staged exact source replacements or source selections carried into dependency resolution | Only selected, fresh, nonoverlapping exact spans are changed; the original folder remains unchanged. Source-only export does not require a build. |
+| 4. Resolve updates | Selected eligible direct updates and optional selected source edits | Updated package/lockfile preview, source-finding count, install/build commands | npm resolves the selected versions; lockfile origin and integrity checks pass; the diff is presented before build execution or dependency export. |
+| 5. Build | Approved preview and explicit build acknowledgement | Captured build result; exportable staged files only on success | Both locked installation and the declared build exit with code zero within execution/output limits. Failure blocks download; tests are not run by the workflow. |
+| 6. Export | Applied source-only copy or successful dependency-build copy | ZIP containing approved files and transformation report | Archive content reflects the approved staged changes and records build status when applicable; generated build output and installed dependencies are excluded. |
+
+### Boundaries And Meaning Of Success
+
+* The browser uploads to the local Node server. The original selected folder is never edited; changes are staged in memory or disposable temporary copies.
+* Foundry receives approved source for refactoring. npm Registry receives package identifiers, and OSV receives package/version identifiers. Dependency evidence is not a model-generated migration or a compatibility guarantee.
+* API credentials stay on the server. Review sessions are temporary, expire after inactivity, and do not survive a server restart.
+* Dependency resolution uses the public npm registry. Build installation uses controlled empty npm configs and a sanitized environment; dependency lifecycle hooks are disabled.
+* The declared build still executes uploaded project code on the server machine. A temporary folder is not an OS sandbox. Install and build limits are three minutes and two minutes respectively, with a 128 KiB command-output limit.
+* Source-only success means selected edits were validated and staged, not that the project builds. Dependency-update success means installation and the declared build passed, not that runtime behavior, security, or all API compatibility was verified.
+* In the studio sample, the declared build runs the CLI and report writer rather than compiling source. Different uploads run their own declared build scripts; the workflow does not add a separate test run.
+
+### Proposed Only: Dependency Migration
+
+Babel-based JavaScript/TypeScript dependency-reference discovery and model-proposed migration edits are not implemented. The current source analysis is not guided by dependency versions selected later, and the update-diff screen does not yet offer dependency-specific source migrations.
+
+The discussed extension would discover affected staged files and show migration proposals within the existing update-preview stage, without adding a user-facing stage. Its scope, limits, migration-guidance sources, transfer consent, approval behavior, and acceptance criteria are still undecided. C# is outside that proposed migration capability for now; this does not remove existing source-analysis support. This discussion is not authorization to implement the extension.
+
 <details>
 <summary>How each step works: inputs, outputs, and tools</summary>
 

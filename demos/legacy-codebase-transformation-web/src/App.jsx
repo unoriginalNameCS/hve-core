@@ -600,7 +600,9 @@ export default function App() {
                 <button className="button button-primary" type="button" onClick={applySelected}
                   disabled={(selected.size === 0 && selectedUpdates.size === 0) || busy !== ''}>
                   {busy === 'apply' ? 'Applying…' : busy === 'update-prepare' ? 'Resolving update…' : selectedUpdates.size > 0 ?
-                    `Resolve ${selectedUpdates.size} update${selectedUpdates.size === 1 ? '' : 's'}` :
+                    selected.size > 0 ?
+                      `Stage ${selected.size} source change${selected.size === 1 ? '' : 's'} + ${selectedUpdates.size} dependency update${selectedUpdates.size === 1 ? '' : 's'}` :
+                      `Resolve ${selectedUpdates.size} dependency update${selectedUpdates.size === 1 ? '' : 's'}` :
                     `Approve ${selected.size} and transform`}
                 </button>
               </div>
