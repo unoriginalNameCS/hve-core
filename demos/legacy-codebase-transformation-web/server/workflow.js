@@ -2,9 +2,9 @@
 
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { SOURCE_EXTENSIONS, chunkSourceFiles, hashSource, isExcludedPath, scanPrompt } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
+const { SOURCE_EXTENSIONS, chunkSourceFiles, hashSource, isExcludedPath } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
 const { MAX_FINDINGS_PER_REQUEST, MAX_MODEL_REQUESTS } = require('../../legacy-codebase-transformation/extension/src/scan-pipeline');
-const { validateUploadedFinding } = require('./analysis');
+const { scanPrompt, validateUploadedFinding, javaScriptReplacementFailure } = require('./analysis');
 const { assessNpmDependencies, inventoryNpmFiles } = require('./dependency-review');
 const { prepareDependencyBuild: resolveDependencyBuild, runApprovedBuild } = require('./dependency-build');
 const { getFoundryConfiguration, requestFindings } = require('./foundry-client');
@@ -340,6 +340,8 @@ function prepareApprovedChanges(session, approvedFindingIds, allowEmpty = false)
     for (const change of [...changes].reverse()) {
       updatedText = `${updatedText.slice(0, change.start)}${change.replacementText}${updatedText.slice(change.end)}`;
     }
+    const syntaxFailure = javaScriptReplacementFailure(relativePath, originalText, updatedText);
+    if (syntaxFailure) throw appError(`${relativePath}: ${syntaxFailure} Nothing was applied.`);
     updatedFiles.set(relativePath, Buffer.from(updatedText, 'utf8'));
   }
 

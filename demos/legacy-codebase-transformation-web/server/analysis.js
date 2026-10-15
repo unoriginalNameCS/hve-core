@@ -1,12 +1,47 @@
 'use strict';
 
+const { compileFunction } = require('node:vm');
 const { chunkSourceFiles, scanPrompt: buildSharedScanPrompt } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
 const { validateFindingResponse } = require('../../legacy-codebase-transformation/extension/src/scan-pipeline');
 
 function scanPrompt(chunk, remainingFindings) {
   const prompt = JSON.parse(buildSharedScanPrompt(chunk, remainingFindings));
   prompt.instructions += ' When a function has several levels of nested conditionals that determine its outcome, prioritize one safe whole-function simplification that removes the nesting over a tiny local cleanup. If behavior can be preserved, set originalText to the exact complete function and replacementText to a shorter complete replacement. Keep the change to one function and omit it if you cannot verify the behavior-preserving replacement.';
+  prompt.instructions += ' Preserve the existing module format. In CommonJS files retain require, module.exports, __dirname, and dynamic import() compatibility; do not introduce static import/export declarations or top-level await. Findings must not overlap; provide one preferred replacement for a source span, not competing alternatives.';
   return JSON.stringify(prompt);
+}
+
+function javaScriptReplacementFailure(relativePath, originalText, updatedText) {
+  if (!/\.(?:js|cjs)$/i.test(relativePath)) return null;
+  try {
+    compileFunction(originalText);
+  } catch {
+    return null;
+  }
+  try {
+    compileFunction(updatedText);
+    return null;
+  } catch {
+    return 'Replacement must preserve valid JavaScript and the existing CommonJS/script module format; static import/export and top-level await are not compatible.';
+  }
+}
+
+function validateReplacementSyntax(result, chunk) {
+  const findings = [];
+  const rejections = [...result.rejections];
+  for (const finding of result.findings) {
+    const normalizedContent = chunk.content.replace(/\r\n/g, '\n');
+    const originalText = finding.originalText.replace(/\r\n/g, '\n');
+    const replacementText = finding.replacementText.replace(/\r\n/g, '\n');
+    const lines = normalizedContent.split('\n');
+    const startLine = finding.range.startLine - chunk.startLine;
+    const start = lines.slice(0, startLine).reduce((offset, line) => offset + line.length + 1, 0) + finding.range.startCharacter;
+    const updatedText = normalizedContent.slice(0, start) + replacementText + normalizedContent.slice(start + originalText.length);
+    const failure = javaScriptReplacementFailure(chunk.path, normalizedContent, updatedText);
+    if (failure) rejections.push(failure);
+    else findings.push(finding);
+  }
+  return { findings, rejections };
 }
 
 function recoverFindingCoordinates(candidate, content) {
@@ -68,7 +103,7 @@ function validateUploadedFinding(payload, chunk) {
   const findings = validateFindingResponse(payload, chunk, rejections);
   if (!rejections.some((reason) => reason.includes('outside the supplied source')) ||
       !payload || !Array.isArray(payload.findings)) {
-    return { findings, rejections: explainTextRejections(rejections, payload?.findings ?? []) };
+    return validateReplacementSyntax({ findings, rejections: explainTextRejections(rejections, payload?.findings ?? []) }, chunk);
   }
 
   const recoveredFindings = [];
@@ -92,7 +127,7 @@ function validateUploadedFinding(payload, chunk) {
     recoveredFindings.push(...validateFindingResponse({ findings: [recovered] }, chunk, retryRejections));
     recoveredRejections.push(...explainTextRejections(retryRejections, [recovered]));
   }
-  return { findings: recoveredFindings, rejections: recoveredRejections };
+  return validateReplacementSyntax({ findings: recoveredFindings, rejections: recoveredRejections }, chunk);
 }
 
-module.exports = { chunkSourceFiles, scanPrompt, validateUploadedFinding };
+module.exports = { chunkSourceFiles, scanPrompt, validateUploadedFinding, javaScriptReplacementFailure };

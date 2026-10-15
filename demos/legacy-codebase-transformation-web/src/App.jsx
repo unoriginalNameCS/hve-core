@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { findProposalOverlaps, keepProposal } from './proposal-overlaps.mjs';
 
 const STEPS = [
   { id: 'upload', number: '01', title: 'Upload' },
@@ -207,6 +208,49 @@ function ChangeReport({ report }) {
   );
 }
 
+function OverlapComparison({ pair, selected, onKeep, onClose }) {
+  const dialogRef = useRef(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const previousFocus = document.activeElement;
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      previousFocus?.focus();
+    };
+  }, []);
+
+  return (
+    <dialog ref={dialogRef} className="overlap-dialog" aria-labelledby="overlap-title" aria-describedby="overlap-location" onClose={(event) => {
+      if (!event.currentTarget.open) onClose();
+    }} onCancel={(event) => {
+      event.preventDefault();
+      onClose();
+    }}>
+      <div className="overlap-dialog-heading">
+        <h2 id="overlap-title">Proposal {pair.leftNumber} vs {pair.rightNumber}</h2>
+        <button className="button button-quiet" type="button" onClick={onClose} autoFocus>Close comparison</button>
+      </div>
+      <p id="overlap-location" className="overlap-location">{pair.left.path}<br />Shared source: {pair.start.line}:{pair.start.character + 1} to {pair.end.line}:{pair.end.character + 1} (end exclusive)</p>
+      <div className="overlap-comparison">
+        {[{ finding: pair.left, number: pair.leftNumber, other: pair.right },
+          { finding: pair.right, number: pair.rightNumber, other: pair.left }].map(({ finding, number, other }) => (
+          <section className="overlap-alternative" key={finding.id} aria-labelledby={`alternative-${number}`}>
+            <h3 id={`alternative-${number}`}>Proposal {number} <span>{selected.has(finding.id) ? 'Selected' : 'Not selected'}</span></h3>
+            <p className="finding-meta">{finding.symbol} · lines {finding.range.startLine}-{finding.range.endLine} · {finding.confidence} confidence</p>
+            <p className="finding-rationale">{finding.rationale}</p>
+            <div className="change-columns">
+              <div><span>BEFORE</span><pre>{finding.originalText}</pre></div>
+              <div><span>PROPOSED</span><pre>{finding.replacementText}</pre></div>
+            </div>
+            <button className="button button-primary" type="button" onClick={() => onKeep(finding.id, other.id)}>Keep proposal {number}</button>
+          </section>
+        ))}
+      </div>
+    </dialog>
+  );
+}
+
 export default function App() {
   const inputRef = useRef(null);
   const [stage, setStage] = useState('upload');
@@ -217,6 +261,7 @@ export default function App() {
   const [dependencyConsent, setDependencyConsent] = useState(false);
   const [review, setReview] = useState(null);
   const [selected, setSelected] = useState(new Set());
+  const [comparedPair, setComparedPair] = useState(null);
   const [selectedUpdates, setSelectedUpdates] = useState(new Set());
   const [updatePreview, setUpdatePreview] = useState(null);
   const [buildResult, setBuildResult] = useState(null);
@@ -301,6 +346,10 @@ export default function App() {
   }
 
   async function applySelected() {
+    if (selectedOverlaps.length) {
+      setComparedPair(selectedOverlaps[0]);
+      return;
+    }
     if (selectedUpdates.size > 0) {
       await prepareSelectedUpdates();
       return;
@@ -388,6 +437,7 @@ export default function App() {
     setDependencyConsent(false);
     setReview(null);
     setSelected(new Set());
+    setComparedPair(null);
     setSelectedUpdates(new Set());
     setUpdatePreview(null);
     setBuildResult(null);
@@ -419,6 +469,13 @@ export default function App() {
   const activeStep = STEPS.findIndex((item) => item.id === stage);
   const hasDependencyLookups = Boolean(prepared && (prepared.dependencyPreview.registryNames.length || prepared.dependencyPreview.advisoryTuples.length));
   const requiresCombinedApproval = Boolean(prepared?.sourceDisclosure.files.length && hasDependencyLookups);
+  const overlaps = findProposalOverlaps(review?.findings ?? []);
+  const selectedOverlaps = overlaps.filter((pair) => selected.has(pair.left.id) && selected.has(pair.right.id));
+
+  function keepComparedProposal(keepId, otherId) {
+    setSelected((current) => keepProposal(current, keepId, otherId));
+    setComparedPair(null);
+  }
 
   return (
     <div className="app-shell">
@@ -598,7 +655,8 @@ export default function App() {
               <div className="review-actions">
                 <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject review</button>
                 <button className="button button-primary" type="button" onClick={applySelected}
-                  disabled={(selected.size === 0 && selectedUpdates.size === 0) || busy !== ''}>
+                  disabled={(selected.size === 0 && selectedUpdates.size === 0) || busy !== '' || selectedOverlaps.length > 0}
+                  aria-describedby={selectedOverlaps.length ? 'overlap-selection-status' : undefined}>
                   {busy === 'apply' ? 'Applying…' : busy === 'update-prepare' ? 'Resolving update…' : selectedUpdates.size > 0 ?
                     selected.size > 0 ?
                       `Stage ${selected.size} source change${selected.size === 1 ? '' : 's'} + ${selectedUpdates.size} dependency update${selectedUpdates.size === 1 ? '' : 's'}` :
@@ -617,11 +675,29 @@ export default function App() {
             {review.dependencyAssessment && <DependencyEvidence assessment={review.dependencyAssessment}
               selectedUpdates={selectedUpdates} onToggleUpdate={toggleUpdate} />}
             {review.findings.length === 0 && review.complete && <p className="empty-review">The selected source did not produce an actionable refactor finding.</p>}
+            {overlaps.length > 0 && (
+              <section className="overlap-summary" aria-labelledby="overlap-summary-title">
+                <h3 id="overlap-summary-title">Overlapping proposals ({overlaps.length} {overlaps.length === 1 ? 'pair' : 'pairs'})</h3>
+                <p id="overlap-selection-status" role="status">{selectedOverlaps.length ?
+                  `${selectedOverlaps.length} selected ${selectedOverlaps.length === 1 ? 'pair conflicts' : 'pairs conflict'}. Choose one proposal per overlapping pair before staging.` :
+                  'No selected proposals conflict.'}</p>
+                <ul className="overlap-pairs">
+                  {overlaps.map((pair) => (
+                    <li key={pair.key}>
+                      <div><strong>Proposal {pair.leftNumber} + proposal {pair.rightNumber}</strong>
+                        <span>{pair.left.path} · shared lines {pair.start.line}-{pair.end.line}</span>
+                        <small>{selected.has(pair.left.id) && selected.has(pair.right.id) ? 'Both selected: conflict' : 'Alternative proposals'}</small></div>
+                      <button className="button button-quiet" type="button" onClick={() => setComparedPair(pair)} disabled={busy !== ''}>Compare proposals {pair.leftNumber} and {pair.rightNumber}</button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             <div className="finding-list">
               {review.findings.map((finding, index) => (
                 <article className={`finding ${selected.has(finding.id) ? 'selected' : ''}`} key={finding.id}>
                   <label className="finding-select">
-                    <input type="checkbox" checked={selected.has(finding.id)} onChange={() => toggleFinding(finding.id)} disabled={busy !== ''} />
+                    <input type="checkbox" aria-label={`Select proposal ${index + 1}`} checked={selected.has(finding.id)} onChange={() => toggleFinding(finding.id)} disabled={busy !== ''} />
                     <span className="checkmark" aria-hidden="true" />
                     <span className="finding-number">{String(index + 1).padStart(2, '0')}</span>
                   </label>
@@ -631,8 +707,16 @@ export default function App() {
                       <span>{finding.symbol}</span>
                       <span>{finding.category}</span>
                       <span>{finding.confidence} confidence</span>
+                      <span>lines {finding.range.startLine}-{finding.range.endLine}</span>
                     </div>
                     <p className="finding-rationale">{finding.rationale}</p>
+                    <div className="finding-overlaps">
+                      {overlaps.filter((pair) => pair.left.id === finding.id || pair.right.id === finding.id).map((pair) => (
+                        <button className="overlap-link" key={pair.key} type="button" disabled={busy !== ''} onClick={() => setComparedPair(pair)}>
+                          Overlaps proposal {pair.left.id === finding.id ? pair.rightNumber : pair.leftNumber}: compare
+                        </button>
+                      ))}
+                    </div>
                     <details className="change-details">
                       <summary>Inspect exact change</summary>
                       <div className="change-columns">
@@ -745,6 +829,8 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {comparedPair && <OverlapComparison pair={comparedPair} selected={selected} onKeep={keepComparedProposal} onClose={() => setComparedPair(null)} />}
 
       <footer className="footer-bar">
         <span>LOCAL DEMO</span>

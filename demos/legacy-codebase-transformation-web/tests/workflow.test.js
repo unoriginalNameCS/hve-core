@@ -96,6 +96,8 @@ test('source analysis retries once when the model returns invalid replacement te
   });
 
   assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /Preserve the existing module format/);
+  assert.match(prompts[0], /Findings must not overlap/);
   assert.match(prompts[1], /Validation feedback/);
   assert.match(prompts[1], /replacementText is unchanged from originalText/);
   assert.equal(review.complete, true);
@@ -130,4 +132,27 @@ test('approval edits only the staged copy and refuses unapproved or repeated wri
   assert.equal(originalBuffer.toString('utf8'), source);
   assert.throws(() => applyApprovedFindings(result.sessionId, [result.findings[0].id]), /already been transformed/);
   removeSession(result.sessionId);
+});
+
+test('individually valid proposals cannot stage an invalid combined JavaScript file', async () => {
+  const content = 'function summarize() {\n  var first = 1;\n  var second = 2;\n  return first + second;\n}\n';
+  const bytes = Buffer.from(content);
+  const preview = prepareUpload([{ id: 'file-0', path: 'project/src/summary.js', size: bytes.length }],
+    new Map([['file-0', bytes]]));
+  const proposals = [2, 3].map((line, index) => ({
+    ...candidate, symbol: 'summarize', functionStartLine: 1, functionEndLine: 5,
+    startLine: line, endLine: line, startCharacter: 2,
+    endCharacter: content.split('\n')[line - 1].length,
+    originalText: index === 0 ? 'var first = 1;' : 'var second = 2;',
+    replacementText: `const shared = ${index + 1};`
+  }));
+  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
+    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
+    requestFindings: async () => ({ findings: proposals })
+  });
+  assert.equal(review.findings.length, 2);
+  assert.throws(() => applyApprovedFindings(preview.sessionId, review.findings.map((finding) => finding.id)),
+    /summary\.js: Replacement must preserve valid JavaScript/);
+  assert.equal(getSession(preview.sessionId).files.get('project/src/summary.js').toString(), content);
+  removeSession(preview.sessionId);
 });
