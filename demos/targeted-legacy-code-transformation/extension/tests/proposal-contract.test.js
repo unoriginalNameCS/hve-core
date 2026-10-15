@@ -65,7 +65,7 @@ test('report renderer includes only validated evidence and exact proposed text',
   assert.match(rendered, /No source files were changed or validated/);
 });
 
-test('report renderer shows local expectations when supplemental inputs have not run', () => {
+test('report renderer marks characterization outputs as uncaptured when inputs have not run', () => {
   const targetPath = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
   const candidate = proposal();
   candidate.target.path = targetPath;
@@ -82,10 +82,11 @@ test('report renderer shows local expectations when supplemental inputs have not
 
   assert.match(rendered, /## Requested Refactor/);
   assert.match(rendered, /Simplify nested conditionals while preserving behavior/);
-  assert.match(rendered, /Supplemental Sample Inputs/);
-  assert.match(rendered, /Expected by fixture rules/);
-  assert.match(rendered, /"5\.00"/);
-  assert.match(rendered, /These cases have not run yet/);
+  assert.match(rendered, /Characterization Baseline Analysis/);
+  assert.match(rendered, /"subtotal":"50\.00"/);
+  assert.match(rendered, /Not captured/);
+  assert.match(rendered, /0 of 1 characterization outputs were captured/);
+  assert.doesNotMatch(rendered, /Supplemental Sample Inputs|Expected by fixture rules|### Sample/);
 });
 
 test('report renderer escapes model prose from Markdown structure', () => {
@@ -95,6 +96,34 @@ test('report renderer escapes model prose from Markdown structure', () => {
 
   assert.match(rendered, /\\# Injected heading/);
   assert.match(rendered, /\\\* Injected list item/);
+});
+
+test('report baseline table informs review using captured outputs before proposed changes', () => {
+  const sampleInputs = [
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
+    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 25 },
+    { accounts: [{ id: 'alice', balance: 100 }], sourceId: 'alice', destinationId: 'missing', amount: 1 }
+  ];
+  const context = {
+    discovery: { target: { resolution: 'unique' } }, sampleInputs,
+    expectedSampleCase: () => 'Expected result is separate',
+    baselineObservations: { baseline: { suggestedCases: [
+      { stdout: '{"result":{"accepted":true,"reason":null},"balances":{"alice":75,"bob":75}}\n', stderr: '', exitCode: 0 },
+      { stdout: '{"result":{"accepted":false,"reason":"source missing"},"balances":{"alice":100,"bob":50}}\n', stderr: 'diagnostic|text\n', exitCode: 0 }
+    ] } }
+  };
+  const rendered = renderProposalReport(proposal(), evidence, undefined, context);
+  const table = rendered.slice(rendered.indexOf('## Characterization Baseline Analysis'), rendered.indexOf('## Proposed Changes'));
+  assert.match(table, /\| Case \| Sample Input \| Captured Output \(stdout\) \| stderr \| Exit Code \|/);
+  assert.match(table, /"alice":75,"bob":75/);
+  assert.match(table, /diagnostic&#124;text/);
+  assert.match(table, /Not captured/);
+  assert.match(table, /2 of 3 characterization outputs were captured/);
+  assert.match(table, /1 accepted transfers and 1 rejected transfers with unchanged balances/);
+  assert.match(table, /do not prove validation precedence/);
+  assert.doesNotMatch(table, /Expected result is separate/);
+  assert.doesNotMatch(rendered, /Supplemental Sample Inputs|### Sample/);
+  assert.equal((rendered.match(/## Characterization Baseline Analysis/g) ?? []).length, 1);
 });
 
 test('proposal validation rejects a different target and ungrounded replacement source', () => {

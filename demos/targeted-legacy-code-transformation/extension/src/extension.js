@@ -27,10 +27,12 @@ class GenerateProposalReportTool {
 		let metadata;
 		try {
 			const input = options.input;
-			if (!input || Object.keys(input).some((key) => !['projectRoot', 'targetFile', 'targetSymbol', 'changeRequest'].includes(key)) ||
+			if (!input || Object.keys(input).some((key) => !['projectRoot', 'targetFile', 'targetSymbol', 'changeRequest', 'testFile'].includes(key)) ||
 				!['projectRoot', 'targetFile', 'targetSymbol'].every((key) => typeof input[key] === 'string' && input[key].trim()) ||
 				(input.changeRequest !== undefined && (typeof input.changeRequest !== 'string' ||
-					!input.changeRequest.trim() || input.changeRequest.length > MAX_REFACTOR_REQUEST_LENGTH))) {
+					!input.changeRequest.trim() || input.changeRequest.length > MAX_REFACTOR_REQUEST_LENGTH)) ||
+				(input.testFile !== undefined && (typeof input.testFile !== 'string' ||
+					!input.testFile.trim() || input.testFile.length > 1024))) {
 				throw new Error('Invalid report tool input. A live refactor request must be 1,000 characters or fewer.');
 			}
 			const root = await resolveWorkspaceRoot(input.projectRoot, this.vscode.workspace.workspaceFolders);
@@ -38,7 +40,7 @@ class GenerateProposalReportTool {
 				.get('reportDirectory', DEFAULT_REPORT_DIRECTORY);
 			if (token?.isCancellationRequested) return this.result({ status: 'cancelled' });
 			const consent = await this.vscode.window.showWarningMessage('Generate and write a proposal report without changing source?',
-				{ modal: true, detail: `Root: ${root.realPath}\nSource: ${input.targetFile}\nSymbol: ${input.targetSymbol}\nMode: Live Foundry\nRequested refactor: ${input.changeRequest ?? DEFAULT_REFACTOR_REQUEST}\nArtifact directory: ${reportDirectory}\nA separate exact-context sharing confirmation follows. For the pinned pizza and Node fixtures, baseline tests and sample cases run in disposable copies; arbitrary project code is not executed. Source files are not changed.` },
+				{ modal: true, detail: `Root: ${root.realPath}\nSource: ${input.targetFile}\nSymbol: ${input.targetSymbol}\nTest file (local only): ${input.testFile ?? 'not selected'}\nMode: Live Foundry\nRequested refactor: ${input.changeRequest ?? DEFAULT_REFACTOR_REQUEST}\nArtifact directory: ${reportDirectory}\nThe selected test file is not sent to Foundry or executed during generation. A separate exact-context sharing confirmation follows. For the pinned pizza fixture, baseline tests and sample cases run in disposable copies; arbitrary project code is not executed during generation. Source files are not changed.` },
 				'Generate report');
 			if (consent !== 'Generate report' || token?.isCancellationRequested) return this.result({ status: 'cancelled' });
 			const generated = await generateProposalReport(this.vscode, { ...input, reportDirectory }, token, this.options);

@@ -2,6 +2,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const syncFs = require('node:fs');
 const { createHash, randomUUID } = require('node:crypto');
 const { isPathWithinRoot, resolveWorkspaceRoot } = require('./workspace-scope');
@@ -104,17 +105,31 @@ function replacementBytes(candidate) {
     Buffer.from(replacement, 'utf8'), original.subarray(bomSize + Buffer.byteLength(sourceSnapshot.text.slice(0, end)))]);
 }
 
-function proposalDetail(candidate) {
+function proposalDetail(candidate, testPreflight) {
   const change = candidate.proposal.changes[0];
   const removed = change.originalText.split('\n').map((line) => `-${line}`).join('\n');
   const added = change.replacementText.split('\n').map((line) => `+${line}`).join('\n');
   const request = candidate.changeRequest ? `Requested refactor: ${candidate.changeRequest}\n` : '';
+  const testDisclosure = candidate.testFileSnapshot ?
+    `Selected local test: ${candidate.testFileSnapshot.path}\nNode runtime: ${testPreflight.runtimeVersion}\n` +
+    `Lockfile: ${testPreflight.lockHash ? path.join(candidate.sourceSnapshot.rootPath, 'package-lock.json') : 'not required'}\n` +
+    `Install: ${testPreflight.installRequired ? 'npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/' : 'not required'}\n` +
+    `Registry: ${testPreflight.installRequired ? 'https://registry.npmjs.org/' : 'not accessed'}\n` +
+    `Baseline: node --test --test-reporter=tap ${candidate.testFileSnapshot.path} in copy A\n` +
+    `Transformed: node --test --test-reporter=tap ${candidate.testFileSnapshot.path} in copy B\n` +
+    (candidate.sampleInputs?.length ? `Characterization tests: ${candidate.sampleInputs.length} inputs; baseline outputs captured before review and replayed against both copies.\n` : '') +
+    'Test stdout/stderr capped at 1 MiB per run will be saved in the local verification report.\n' : '';
   return `${request}Proposal ID: ${candidate.id}\nProposal SHA-256: ${candidate.proposalHash}\nSource SHA-256: ${candidate.sourceSnapshot.fileHash}\n` +
     `Affected file: ${path.join(candidate.sourceSnapshot.rootPath, change.path)}\n` +
+    testDisclosure +
     `Original:\n${change.originalText}\nReplacement:\n${change.replacementText}\n` +
     `Exact diff:\n--- ${change.path}\n+++ ${change.path}\n${removed}\n${added}\n` +
-    'After confirmation, the proposed code executes in pinned fixture tests and representative inputs on a disposable copy. The copy is not an OS sandbox. ' +
-    'Continue only if you trust this proposal. Failure or cancellation leaves source unchanged. Coverage is sampled, not an equivalence proof.';
+    (candidate.testFileSnapshot ?
+      'The selected test and imported project code execute with your permissions. Temporary copies are not an OS sandbox. ' +
+      'A passing selected test is not proof of general equivalence. Failure or cancellation leaves source unchanged.' :
+      'After confirmation, the proposed code executes in pinned fixture tests and representative inputs on a disposable copy. The copy is not an OS sandbox. ') +
+    (candidate.testFileSnapshot ? '' :
+      'Continue only if you trust this proposal. Failure or cancellation leaves source unchanged. Coverage is sampled, not an equivalence proof.');
 }
 
 function writeExactSource(vscode, candidate, bytes, token) {
@@ -164,7 +179,7 @@ class ProposalCandidateStore {
   #verifier;
 
   constructor(verifier) {
-    this.#verifier = verifier ?? ((candidate, token) => require('./fixture-replay').verifyControlledProposal(candidate, token));
+    this.#verifier = verifier ?? ((candidate, token, preflight) => require('./fixture-replay').verifyControlledProposal(candidate, token, preflight));
   }
 
   list() {
@@ -176,13 +191,27 @@ class ProposalCandidateStore {
   async add(vscode, result) {
     if (result.status !== 'ready' || result.proposal.changes.length === 0) return null;
     const candidate = structuredClone({ ...result, id: randomUUID() });
+    if (candidate.testFileSnapshot) {
+      try {
+        validateRelativePath(candidate.testFileSnapshot.path);
+      } catch {
+        throw new Error('Invalid selected Node test path.');
+      }
+      if (!/\.(?:js|cjs|mjs)$/i.test(candidate.testFileSnapshot.path) ||
+          !/\.(?:js|cjs|mjs)$/i.test(candidate.target.path)) {
+        throw new Error('Selected-test candidates must target one Node source file and one supported test file.');
+      }
+    }
     candidate.sampleInputs = validateSampleInputs(candidate.sampleInputs ?? [], candidate.target, candidate.mode === 'live');
     if (!validateProposal(candidate.proposal, candidate.evidenceCatalog, candidate.target).valid ||
         hashBytes(JSON.stringify(candidate.proposal)) !== candidate.proposalHash ||
         hashBytes(JSON.stringify(candidate.evidenceCatalog)) !== candidate.evidenceHash ||
         hashBytes(candidate.target.source.text) !== candidate.targetSpanHash ||
         candidate.sourceSnapshot.path !== candidate.target.path ||
-        hashBytes(Buffer.from(candidate.sourceSnapshot.bytes, 'base64')) !== candidate.sourceSnapshot.fileHash) {
+        hashBytes(Buffer.from(candidate.sourceSnapshot.bytes, 'base64')) !== candidate.sourceSnapshot.fileHash ||
+        candidate.testFileSnapshot && (candidate.testFileSnapshot.rootPath !== candidate.sourceSnapshot.rootPath ||
+          candidate.testFileSnapshot.path === candidate.sourceSnapshot.path ||
+          hashBytes(Buffer.from(candidate.testFileSnapshot.bytes, 'base64')) !== candidate.testFileSnapshot.fileHash)) {
       throw new Error('Invalid proposal candidate.');
     }
     replacementBytes(candidate);
@@ -199,6 +228,14 @@ class ProposalCandidateStore {
     const root = await resolveWorkspaceRoot(candidate.sourceSnapshot.rootPath, vscode.workspace.workspaceFolders);
     if (root.realPath !== candidate.sourceSnapshot.rootPath) throw new Error('Selected root changed.');
     await assertSourceSnapshot(vscode, candidate.sourceSnapshot);
+    if (candidate.testFileSnapshot) {
+      const testSnapshot = await captureSourceSnapshot(vscode, candidate.sourceSnapshot.rootPath,
+        path.join(candidate.sourceSnapshot.rootPath, ...candidate.testFileSnapshot.path.split('/')));
+      if (testSnapshot.fileHash !== candidate.testFileSnapshot.fileHash ||
+          testSnapshot.version !== candidate.testFileSnapshot.version) {
+        throw new Error('Selected test changed; generate a revised proposal.');
+      }
+    }
     const report = await safeFile(root.realPath, candidate.reportRelativePath);
     const document = vscode.workspace.openTextDocument ? await vscode.workspace.openTextDocument(report) :
       (vscode.workspace.textDocuments ?? []).find((item) => item.uri.fsPath === report);
@@ -216,16 +253,31 @@ class ProposalCandidateStore {
     this.#active.add(proposalId);
     let verificationReportPath;
     let verification;
+    let testPreflight;
     try {
       await this.#assertCurrent(vscode, candidate, token);
-      await require('./fixture-replay').readControlledFixture(candidate);
+      if (candidate.testFileSnapshot) {
+        const workspaceTools = require('./node-test-workspace');
+        testPreflight = await workspaceTools.inspectNodeTestProject(candidate.sourceSnapshot.rootPath,
+          candidate.testFileSnapshot.path);
+        if (testPreflight.testFileHash !== candidate.testFileSnapshot.fileHash) {
+          throw new Error('Selected test changed; generate a revised proposal.');
+        }
+        const nodeExecutable = await workspaceTools.resolveNodeExecutable();
+        const runtimeVersion = await workspaceTools.readSupportedNodeVersion(nodeExecutable,
+          workspaceTools.safeProcessEnvironment(os.tmpdir()), { token });
+        const npmCliPath = testPreflight.installRequired ? await workspaceTools.resolveNpmCli(nodeExecutable) : null;
+        testPreflight = { ...testPreflight, nodeExecutable, npmCliPath, runtimeVersion };
+      } else {
+        await require('./fixture-replay').readControlledFixture(candidate);
+      }
       if (typeof vscode.window?.showWarningMessage !== 'function') throw new Error('Extension-owned confirmation is unavailable.');
       const choice = await vscode.window.showWarningMessage('Review and apply this exact proposal?',
-        { modal: true, detail: proposalDetail(candidate) }, APPLY_LABEL);
+        { modal: true, detail: proposalDetail(candidate, testPreflight) }, APPLY_LABEL);
       checkCancelled(token);
       if (choice !== APPLY_LABEL) return { status: 'cancelled' };
       await this.#assertCurrent(vscode, candidate, token);
-      verification = await this.#verifier(candidate, token);
+      verification = await this.#verifier(candidate, token, testPreflight);
       checkCancelled(token);
       const { writeProposalReport } = require('./proposal-report');
       const { renderVerificationReport } = require('./fixture-replay');
@@ -236,7 +288,17 @@ class ProposalCandidateStore {
         return { status: 'failed', reason: 'Controlled verification failed; revised proposal required.', verificationReportPath };
       }
       await this.#assertCurrent(vscode, candidate, token);
-      await require('./fixture-replay').assertFixtureHashes(candidate, verification.fixtureHashes);
+      if (candidate.testFileSnapshot) {
+        const currentProject = await require('./node-test-workspace').inspectNodeTestProject(
+          candidate.sourceSnapshot.rootPath, candidate.testFileSnapshot.path);
+        if (currentProject.testFileHash !== candidate.testFileSnapshot.fileHash ||
+            currentProject.manifestHash !== verification.manifestHash ||
+            currentProject.lockHash !== verification.lockHash) {
+          throw new Error('Selected test or npm project changed during verification.');
+        }
+      } else {
+        await require('./fixture-replay').assertFixtureHashes(candidate, verification.fixtureHashes);
+      }
       await this.#assertCurrent(vscode, candidate, token);
       const bytes = replacementBytes(candidate);
       await safeFile(candidate.sourceSnapshot.rootPath, candidate.sourceSnapshot.path);

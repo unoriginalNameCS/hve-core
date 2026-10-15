@@ -2,7 +2,7 @@
 
 const PIZZA_TARGET_PATH = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
 const NODE_TARGET_PATH = 'src/transfer.js';
-const MAX_SAMPLE_CASES = 5;
+const MAX_SAMPLE_CASES = 10;
 const MAX_ACCOUNT_BALANCE = 1000000;
 const ID_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
@@ -61,17 +61,18 @@ function validateSampleInputs(sampleInputs, target, required = false) {
     if (sampleInputs.length !== 0) throw sampleInputError('unsupported', 'Sample inputs are unsupported for this target.');
     return [];
   }
-  if (required && sampleInputs.length < 3) {
-    throw sampleInputError('too-few', 'Sample inputs must contain three to five valid, unique cases for the selected fixture target.');
+  const minimum = isNode ? 5 : 3;
+  if (required && sampleInputs.length < minimum) {
+    throw sampleInputError('too-few', `Sample inputs must contain ${minimum} to ${MAX_SAMPLE_CASES} valid, unique cases for the selected fixture target.`);
   }
   for (const sample of sampleInputs) {
     const reason = isPizza ? pizzaCaseFailure(sample) : validateNodeCase(sample) ? null : 'node-case-shape';
     if (reason) {
-      throw sampleInputError(reason, 'Sample inputs must contain three to five valid, unique cases for the selected fixture target.');
+      throw sampleInputError(reason, `Sample inputs must contain ${minimum} to ${MAX_SAMPLE_CASES} valid, unique cases for the selected fixture target.`);
     }
   }
   if (new Set(sampleInputs.map((item) => JSON.stringify(item))).size !== sampleInputs.length) {
-    throw sampleInputError('duplicate', 'Sample inputs must contain three to five valid, unique cases for the selected fixture target.');
+    throw sampleInputError('duplicate', `Sample inputs must contain ${minimum} to ${MAX_SAMPLE_CASES} valid, unique cases for the selected fixture target.`);
   }
   return structuredClone(sampleInputs);
 }
@@ -91,7 +92,10 @@ function generateSampleInputs(target) {
       { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 25 },
       { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'missing', amount: 25 },
       { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'alice', amount: 25 },
-      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 101 }
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 101 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 0 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: -5 },
+      { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 100 }
     ];
   }
   return Object.freeze(validateSampleInputs(sampleInputs, target, isFixtureTarget(target)));

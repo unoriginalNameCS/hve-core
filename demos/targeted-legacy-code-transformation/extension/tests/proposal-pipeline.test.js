@@ -94,7 +94,8 @@ test('live output generates Node inputs locally and leaves expected results to t
   assert.deepEqual(result.sampleInputs, nodeCases);
   assert.deepEqual(result.proposal, proposal);
   assert.deepEqual(nodeCases.map((sample) => expectedSampleCase(context.target, sample).result.reason),
-    [null, 'source missing', 'destination missing', 'accounts must differ', 'insufficient funds']);
+    [null, 'source missing', 'destination missing', 'accounts must differ', 'insufficient funds',
+      'amount must be positive', 'amount must be positive', null]);
   assert.deepEqual(expectedSampleCase(context.target, nodeCases[0]), {
     result: { accepted: true, reason: null }, balances: { alice: 75, bob: 75 }
   });
@@ -108,13 +109,13 @@ test('fixture sample inputs are locally generated from function behavior and val
 
   const nodeTarget = { path: 'src/transfer.js', symbol: 'transfer' };
   const nodeCases = generateSampleInputs(nodeTarget);
-  assert.equal(nodeCases.length, 5);
+  assert.equal(nodeCases.length, 8);
   assert.deepEqual(validateSampleInputs(nodeCases, nodeTarget, true), nodeCases);
   assert.equal(new Set(nodeCases.map((sample) => JSON.stringify(sample))).size, nodeCases.length);
   assert.deepEqual(generateSampleInputs({ path: 'Target.js', symbol: 'calculate' }), []);
 
   const valid = { accounts: [{ id: 'alice', balance: 100 }], sourceId: 'alice', destinationId: 'bob', amount: 1 };
-  assert.throws(() => validateSampleInputs([valid], nodeTarget, true), /three to five/);
+  assert.throws(() => validateSampleInputs([valid], nodeTarget, true), /5 to 10/);
   assert.throws(() => validateSampleInputs([valid, valid, valid], nodeTarget, true), /valid, unique cases/);
   assert.throws(() => validateSampleInputs([
     valid, valid, { ...valid, accounts: [{ id: '__proto__', balance: 1 }] }
@@ -230,6 +231,41 @@ test('pipeline rediscovers and reads source and writes a Live report from Foundr
   await assert.rejects(assertSourceSnapshot(fixture.vscode, result.sourceSnapshot), /changed/);
   await fs.writeFile(fixture.input.targetFile, fixture.source);
   assert.equal(await fs.readFile(fixture.input.targetFile, 'utf8'), fixture.source);
+});
+
+test('selected Node test is snapshotted locally and excluded from all Foundry evidence', async (context) => {
+  const fixture = await project(context);
+  const testPath = path.join(fixture.root, 'Target.test.js');
+  const testSource = "import test from 'node:test';\n// LOCAL_TEST_SECRET_SENTINEL\ntest('calculation', () => {});\n";
+  await fs.writeFile(testPath, testSource);
+  let foundryContext;
+  const result = await generateProposalReport(fixture.vscode,
+    { ...fixture.input, testFile: 'Target.test.js' }, undefined,
+    { env: fakeEnv, fetchImpl: async (url, request) => {
+      foundryContext = JSON.parse(JSON.parse(request.body).messages[2].content);
+      return fakeFoundry()(url, request);
+    } });
+
+  assert.equal(result.testFileSnapshot.path, 'Target.test.js');
+  assert.equal(result.testFileSnapshot.fileHash, require('node:crypto').createHash('sha256').update(testSource).digest('hex'));
+  assert.equal(foundryContext.evidenceCatalog.some((item) => item.path === 'Target.test.js'), false);
+  assert.doesNotMatch(JSON.stringify(foundryContext), /LOCAL_TEST_SECRET_SENTINEL/);
+  const report = await fs.readFile(result.reportPath, 'utf8');
+  assert.match(report, /Selected Node Test/);
+  assert.match(report, /Target\.test\.js/);
+  assert.match(report, /Test contents were kept local/);
+  assert.doesNotMatch(report, /LOCAL_TEST_SECRET_SENTINEL/);
+});
+
+test('selected Node test path rejects traversal, unsupported extensions, and the target file', async (context) => {
+  const fixture = await project(context);
+  const options = { env: fakeEnv, fetchImpl: fakeFoundry() };
+  await assert.rejects(generateProposalReport(fixture.vscode,
+    { ...fixture.input, testFile: '../outside.test.js' }, undefined, options), /normalized, project-relative/);
+  await assert.rejects(generateProposalReport(fixture.vscode,
+    { ...fixture.input, testFile: 'Target.txt' }, undefined, options), /must be a .js, .cjs, or .mjs/);
+  await assert.rejects(generateProposalReport(fixture.vscode,
+    { ...fixture.input, testFile: 'Target.js' }, undefined, options), /different from the target/);
 });
 
 test('pipeline rejects invented citations and edits outside the selected target span with no report', async (context) => {
@@ -368,7 +404,7 @@ test('report tool always uses Live, rejects mode overrides, and confirms report 
     }
     return 'Send collected context';
   };
-  const result = await invoke(fixture.input);
+  const result = await invoke({ ...fixture.input, testFile: 'Target.test.js' });
   assert.equal(result.status, 'ready');
   assert.equal(result.mode, 'live');
   assert.equal(result.proposalId, null);
@@ -376,6 +412,7 @@ test('report tool always uses Live, rejects mode overrides, and confirms report 
   assert.equal(result.sourceSnapshot, undefined);
   assert.equal(result.evidenceCatalog, undefined);
   assert.equal(result.tests, 'not run');
+  assert.match(await fs.readFile(result.reportPath, 'utf8'), /Selected Node Test/);
   assert.equal(await fs.readFile(fixture.input.targetFile, 'utf8'), fixture.source);
 });
 
@@ -417,7 +454,7 @@ test('Node provider pipeline generates known candidate and ID-only tool applies 
         replacementText: NODE_REPLACEMENT, rationale: 'Replace nested guards with direct early exits.' }]),
     }))
   });
-  const input = { projectRoot: fixture.root, targetFile, targetSymbol: 'transfer' };
+  const input = { projectRoot: fixture.root, targetFile, targetSymbol: 'transfer', testFile: 'tests/transfer.test.js' };
   fixture.vscode.window.showWarningMessage = async (message) => message === 'Generate and write a proposal report without changing source?'
     ? 'Generate report' : 'Send collected context';
   const metadata = JSON.parse((await generation.invoke({ input })).parts[0].value);
@@ -426,25 +463,38 @@ test('Node provider pipeline generates known candidate and ID-only tool applies 
   assert.equal(store.list()[0].id, metadata.proposalId);
   assert.deepEqual(await fs.readFile(targetFile), original);
   const report = await fs.readFile(metadata.reportPath, 'utf8');
+  assert.match(report, /Selected Node Test/);
   assert.match(report, /Observed baseline inputs\/outputs: captured/);
-  assert.match(report, /extension generated these bounded inputs/i);
-  assert.equal((report.match(/### Sample \d+/g) ?? []).length, 5);
-  assert.match(report, /Observed stdout:[\s\S]*"alice"[\s\S]*"bob"/);
-  assert.match(report, /return.*source missing/);
+  assert.match(report, /Characterization Baseline Analysis/);
+  assert.match(report, /8 of 8 characterization outputs were captured/);
+  assert.doesNotMatch(report, /Supplemental Sample Inputs|### Sample \d+/);
   const provenance = report.split('### Discovery Provenance And Limits')[1].split('### Validated Source Catalog')[0];
   const discovery = JSON.parse(provenance.slice(provenance.indexOf('{'), provenance.lastIndexOf('}') + 1));
   assert.deepEqual(discovery.incomingCalls, [{ path: 'src/runner.js', line: 11 }]);
   fixture.vscode.window.showWarningMessage = async () => undefined;
   const apply = new ApplyProposalTool(fixture.vscode, store);
-  assert.equal(JSON.parse((await apply.invoke({ input: { proposalId: metadata.proposalId } })).parts[0].value).status, 'cancelled');
-  assert.deepEqual(await fs.readFile(targetFile), original);
-  fixture.vscode.window.showWarningMessage = async (message, options) => {
-    assert.match(options.detail, /Exact diff:/);
-    return APPLY_LABEL;
-  };
-  const result = JSON.parse((await apply.invoke({ input: { proposalId: metadata.proposalId } })).parts[0].value);
-  assert.equal(result.status, 'applied', JSON.stringify(result));
+  const originalPath = process.env.PATH;
+  let appliedResult;
+  try {
+    process.env.PATH = [path.dirname(process.execPath), originalPath].filter(Boolean).join(path.delimiter);
+    assert.equal(JSON.parse((await apply.invoke({ input: { proposalId: metadata.proposalId } })).parts[0].value).status, 'cancelled');
+    assert.deepEqual(await fs.readFile(targetFile), original);
+    fixture.vscode.window.showWarningMessage = async (message, options) => {
+      assert.match(options.detail, /Exact diff:/);
+      assert.match(options.detail, /Characterization tests: 8 inputs/);
+      return APPLY_LABEL;
+    };
+    appliedResult = JSON.parse((await apply.invoke({ input: { proposalId: metadata.proposalId } })).parts[0].value);
+    assert.equal(appliedResult.status, 'applied', JSON.stringify(appliedResult));
+  } finally {
+    process.env.PATH = originalPath;
+  }
   assert.ok((await fs.readFile(targetFile, 'utf8')).replace(/\r\n/g, '\n').includes(NODE_REPLACEMENT));
+  const verificationReport = await fs.readFile(appliedResult.verificationReportPath, 'utf8');
+  assert.match(verificationReport, /"samples": \[/);
+  assert.match(verificationReport, /"expectedOutput":/);
+  assert.match(verificationReport, /"output":/);
+  assert.match(verificationReport, /"passed": true/);
   fixture.vscode.window.showWarningMessage = async () => 'Send collected context';
   const again = await generateProposalReport(fixture.vscode, input, undefined,
     { env: fakeEnv, fetchImpl: fakeFoundry() });

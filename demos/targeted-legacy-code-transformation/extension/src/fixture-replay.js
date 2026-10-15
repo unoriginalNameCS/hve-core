@@ -7,6 +7,10 @@ const { spawn } = require('node:child_process');
 const { hashBytes, safeFile, replacementBytes } = require('./proposal-apply');
 const { NODE_TARGET_PATH, NODE_REPLACEMENT, NODE_HASHES, NODE_CASES } = require('./node-fixture');
 const { expectedSampleCase, validateSampleInputs } = require('./sample-inputs');
+const { isPathWithinRoot } = require('./workspace-scope');
+const { validateRelativePath } = require('./source-evidence');
+const { inspectNodeTestProject, prepareNodeTestWorkspace, cleanupNodeTestWorkspace,
+  safeProcessEnvironment, runBoundedProcess } = require('./node-test-workspace');
 
 const TARGET_PATH = 'src/PizzaEligibility/PizzaDiscountCalculator.cs';
 const FIXTURE_HASHES = Object.freeze({
@@ -323,7 +327,190 @@ async function verifyNodeProposal(candidate, token) {
   }
 }
 
-function verifyControlledProposal(candidate, token) {
+function parseTapSummary(output) {
+  const summary = {};
+  for (const name of ['tests', 'pass', 'fail', 'cancelled', 'skipped']) {
+    const matches = [...output.matchAll(new RegExp(`^# ${name} (\\d+)\\r?$`, 'gm'))];
+    if (matches.length === 0) return null;
+    summary[name] = Number(matches.at(-1)[1]);
+  }
+  return summary;
+}
+
+function runSelectedNodeTest(workspaceRoot, testFilePath, nodeExecutable, env, token) {
+  const testPath = path.resolve(workspaceRoot, ...testFilePath.split('/'));
+  if (!isPathWithinRoot(workspaceRoot, testPath)) throw new Error('Selected test path escaped its disposable copy.');
+  return runBoundedProcess(nodeExecutable, ['--test', '--test-reporter=tap', testPath], {
+    cwd: workspaceRoot, env, timeoutMs: 120000, maxOutputBytes: 1024 * 1024, token
+  });
+}
+
+async function runSelectedNodeSamples(workspaceRoot, candidate, nodeExecutable, env, token) {
+  const sampleInputs = candidate.sampleInputs ?? [];
+  if (sampleInputs.length === 0) return [];
+  if (candidate.target.path !== NODE_TARGET_PATH || candidate.target.symbol !== 'transfer') {
+    throw new Error('Supplemental Node samples are available only for the pinned transfer target.');
+  }
+  const modulePath = path.resolve(workspaceRoot, ...candidate.target.path.split('/'));
+  if (!isPathWithinRoot(workspaceRoot, modulePath)) throw new Error('Sample target escaped its disposable copy.');
+  const sampleRunner = "const {transfer}=require(process.argv[1]);const sample=JSON.parse(process.argv[2]);const accounts=Object.fromEntries(sample.accounts.map(({id,balance})=>[id,balance]));const result=transfer(accounts,sample.sourceId,sample.destinationId,sample.amount);process.stdout.write(JSON.stringify({result,balances:accounts})+'\\n');";
+  const samples = [];
+  for (const input of sampleInputs) {
+    cancelled(token);
+    const runDirectory = await fs.mkdtemp(path.join(workspaceRoot, 'sample-'));
+    try {
+      const visibleFilesBefore = await visibleFiles(runDirectory);
+      const processResult = await runBoundedProcess(nodeExecutable,
+        ['-e', sampleRunner, modulePath, JSON.stringify(input)], {
+          cwd: runDirectory, env, timeoutMs: 120000, maxOutputBytes: 1024 * 1024, token
+        });
+      const visibleFilesAfter = await visibleFiles(runDirectory);
+      let output = null;
+      try {
+        output = JSON.parse(processResult.stdout);
+      } catch {}
+      const expectedOutput = expectedSampleCase(candidate.target, input);
+      const passed = processResult.exitCode === 0 && !processResult.reason && processResult.stderr === '' &&
+        JSON.stringify(output) === JSON.stringify(expectedOutput) &&
+        JSON.stringify(visibleFilesBefore) === JSON.stringify(visibleFilesAfter);
+      samples.push({ input, expectedOutput, ...processResult, output, passed, visibleFilesBefore, visibleFilesAfter });
+    } finally {
+      await fs.rm(runDirectory, { recursive: true, force: true });
+    }
+  }
+  return samples;
+}
+
+function sameSelectedSamples(before, after) {
+  return before.length === after.length && before.every((item, index) => {
+    const transformed = after[index];
+    return JSON.stringify(item.input) === JSON.stringify(transformed.input) &&
+      JSON.stringify(item.expectedOutput) === JSON.stringify(transformed.expectedOutput) &&
+      item.stdout === transformed.stdout && item.stderr === transformed.stderr &&
+      item.exitCode === transformed.exitCode && item.passed && transformed.passed &&
+      JSON.stringify(item.visibleFilesAfter) === JSON.stringify(transformed.visibleFilesAfter);
+  });
+}
+
+async function verifySelectedNodeProposal(candidate, token, preflight, options = {}) {
+  cancelled(token);
+  if (!candidate.testFileSnapshot || candidate.proposal.changes.length !== 1 ||
+      candidate.proposal.changes[0].path !== candidate.target.path) {
+    throw new Error('Selected-test verification requires one exact Node target-span replacement.');
+  }
+  validateRelativePath(candidate.target.path);
+  validateRelativePath(candidate.testFileSnapshot.path);
+  if (!/\.(?:js|cjs|mjs)$/i.test(candidate.target.path)) {
+    throw new Error('Selected-test verification supports only Node target files.');
+  }
+  const projectPreflight = preflight ?? await inspectNodeTestProject(candidate.sourceSnapshot.rootPath,
+    candidate.testFileSnapshot.path);
+  const workspaceOptions = {
+    nodeExecutable: projectPreflight.nodeExecutable,
+    npmCliPath: projectPreflight.npmCliPath,
+    expectedProjectHashes: {
+      manifestHash: projectPreflight.manifestHash,
+      lockHash: projectPreflight.lockHash,
+      testFileHash: candidate.testFileSnapshot.fileHash
+    },
+    token,
+    ...options.workspaceOptions
+  };
+  const workspace = await prepareNodeTestWorkspace(candidate.sourceSnapshot.rootPath,
+    candidate.testFileSnapshot.path, workspaceOptions);
+  const observations = {
+    status: 'failed', testFile: candidate.testFileSnapshot.path,
+    testFileHash: candidate.testFileSnapshot.fileHash,
+    manifestHash: workspace.manifestHash, lockHash: workspace.lockHash,
+    runtimeVersion: workspace.toolchain.runtimeVersion,
+    installRequired: workspace.installRequired, packageCount: workspace.packageCount,
+    install: workspace.installResult, baseline: null, transformed: null,
+    unknowns: [
+      'Only the selected node:test file is executed; passing it does not prove general behavioral equivalence.',
+      'Selected test and imported project code execute with the user permissions; the disposable copies are not an operating-system sandbox.'
+    ]
+  };
+  try {
+    if (projectPreflight.runtimeVersion && workspace.toolchain.runtimeVersion !== projectPreflight.runtimeVersion) {
+      throw new Error('Node.js runtime changed after confirmation.');
+    }
+    const targetPath = path.resolve(workspace.baselineRoot, ...candidate.target.path.split('/'));
+    const transformedTargetPath = path.resolve(workspace.transformedRoot, ...candidate.target.path.split('/'));
+    const testFilePath = path.resolve(workspace.baselineRoot, ...candidate.testFileSnapshot.path.split('/'));
+    const transformedTestPath = path.resolve(workspace.transformedRoot, ...candidate.testFileSnapshot.path.split('/'));
+    if (![targetPath, transformedTargetPath, testFilePath, transformedTestPath].every((filePath) =>
+      isPathWithinRoot(filePath === targetPath || filePath === testFilePath ? workspace.baselineRoot : workspace.transformedRoot, filePath))) {
+      throw new Error('Target or selected test escaped its disposable copy.');
+    }
+    if (hashBytes(await fs.readFile(targetPath)) !== candidate.sourceSnapshot.fileHash ||
+        hashBytes(await fs.readFile(testFilePath)) !== candidate.testFileSnapshot.fileHash ||
+        hashBytes(await fs.readFile(transformedTestPath)) !== candidate.testFileSnapshot.fileHash) {
+      throw new Error('Target or selected test changed before disposable verification.');
+    }
+    const executeTest = options.runTest ?? runSelectedNodeTest;
+    const env = safeProcessEnvironment(workspace.tempRoot);
+    observations.baseline = await executeTest(workspace.baselineRoot, candidate.testFileSnapshot.path,
+      workspace.toolchain.nodeExecutable, env, token);
+    observations.baseline.summary = parseTapSummary(observations.baseline.stdout);
+    observations.baseline.passed = observations.baseline.exitCode === 0 && !observations.baseline.reason &&
+      observations.baseline.summary?.tests > 0 && observations.baseline.summary.pass === observations.baseline.summary.tests &&
+      observations.baseline.summary.fail === 0 && observations.baseline.summary.cancelled === 0 &&
+      observations.baseline.summary.skipped === 0;
+    if (!observations.baseline.passed) {
+      observations.reason = 'The selected Node test did not pass against the original target.';
+      return observations;
+    }
+    observations.baseline.samples = await runSelectedNodeSamples(workspace.baselineRoot, candidate,
+      workspace.toolchain.nodeExecutable, env, token);
+    if (observations.baseline.samples.some((sample) => !sample.passed)) {
+      observations.reason = 'A supplemental Node sample did not match its extension-owned expected output on the original target.';
+      return observations;
+    }
+    const capturedSamples = candidate.baselineObservations?.baseline?.suggestedCases;
+    if (capturedSamples && (capturedSamples.length !== observations.baseline.samples.length ||
+        capturedSamples.some((sample, index) => sample.stdout !== observations.baseline.samples[index].stdout ||
+          sample.stderr !== observations.baseline.samples[index].stderr ||
+          sample.exitCode !== observations.baseline.samples[index].exitCode))) {
+      observations.reason = 'Original characterization outputs changed since the reviewed baseline was captured.';
+      return observations;
+    }
+    const replacement = replacementBytes(candidate);
+    await fs.writeFile(transformedTargetPath, replacement);
+    observations.transformed = await executeTest(workspace.transformedRoot, candidate.testFileSnapshot.path,
+      workspace.toolchain.nodeExecutable, env, token);
+    observations.transformed.summary = parseTapSummary(observations.transformed.stdout);
+    observations.transformed.passed = observations.transformed.exitCode === 0 && !observations.transformed.reason &&
+      observations.transformed.summary?.tests > 0 && observations.transformed.summary.pass === observations.transformed.summary.tests &&
+      observations.transformed.summary.fail === 0 && observations.transformed.summary.cancelled === 0 &&
+      observations.transformed.summary.skipped === 0;
+    if (!observations.transformed.passed) {
+      observations.reason = 'The selected Node test did not pass against the transformed target.';
+      return observations;
+    }
+    observations.transformed.samples = await runSelectedNodeSamples(workspace.transformedRoot, candidate,
+      workspace.toolchain.nodeExecutable, env, token);
+    if (observations.transformed.samples.some((sample) => !sample.passed)) {
+      observations.reason = 'A supplemental Node sample did not match its extension-owned expected output on the transformed target.';
+      return observations;
+    }
+    if (JSON.stringify(observations.baseline.summary) !== JSON.stringify(observations.transformed.summary) ||
+        !sameSelectedSamples(observations.baseline.samples, observations.transformed.samples)) {
+      observations.reason = 'Selected Node test or supplemental sample results changed between baseline and transformed runs.';
+      return observations;
+    }
+    observations.status = 'passed';
+    return observations;
+  } catch (error) {
+    if (error.code === 'CANCELLED' || token?.isCancellationRequested) throw error;
+    observations.reason = error.message;
+    return observations;
+  } finally {
+    await cleanupNodeTestWorkspace(workspace);
+  }
+}
+
+function verifyControlledProposal(candidate, token, preflight) {
+  if (candidate.testFileSnapshot) return verifySelectedNodeProposal(candidate, token, preflight);
   return controlledDefinition(candidate).kind === 'node' ? verifyNodeProposal(candidate, token) : verifyPizzaProposal(candidate, token);
 }
 
@@ -338,10 +525,13 @@ async function captureControlledBaseline(candidate, token) {
 }
 
 function renderVerificationReport(candidate, verification, application = { status: 'not-applied' }) {
+  const title = candidate.testFileSnapshot ? 'Node Characterization Verification' : 'Controlled Fixture Verification';
+  const description = candidate.testFileSnapshot ? 'Selected Node test observations from disposable copies.' :
+    'Extension-owned disposable fixture observations.';
   const applicationResult = application.status === 'applied' ?
     `Application: applied\n\nApplied source SHA-256: ${application.sourceHash}` :
     'Application: not applied. The selected source was left unchanged.';
-  return `---\ntitle: Controlled Fixture Verification\ndescription: Extension-owned disposable fixture observations.\n---\n\n` +
+  return `---\ntitle: ${title}\ndescription: ${description}\n---\n\n` +
     `## Result\n\nVerification: ${verification.status}\n\nProposal ID: ${candidate.id}\n\nProposal SHA-256: ${candidate.proposalHash}\n\n` +
     `Source SHA-256 before application: ${candidate.sourceSnapshot.fileHash}\n\n${applicationResult}\n\n` +
     `The application status is recorded only after the source write completes. The reviewed proposal report is unchanged. ` +
@@ -350,4 +540,6 @@ function renderVerificationReport(candidate, verification, application = { statu
 }
 
 module.exports = { TARGET_PATH, PIZZA_CASES, readControlledFixture, assertFixtureHashes, runDotnet, runNode,
-  verifyPizzaProposal, verifyNodeProposal, verifyControlledProposal, isControlledTarget, captureControlledBaseline, renderVerificationReport };
+  verifyPizzaProposal, verifyNodeProposal, verifySelectedNodeProposal, parseTapSummary, runSelectedNodeTest,
+  runSelectedNodeSamples, sameSelectedSamples,
+  verifyControlledProposal, isControlledTarget, captureControlledBaseline, renderVerificationReport };

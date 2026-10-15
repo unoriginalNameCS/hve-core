@@ -8,7 +8,8 @@ const test = require('node:test');
 const { EventEmitter } = require('node:events');
 const { generateProposalReport } = require('../src/proposal-report');
 const { APPLY_LABEL, ProposalCandidateStore, replacementBytes, ApplyProposalTool } = require('../src/proposal-apply');
-const { TARGET_PATH, readControlledFixture, verifyPizzaProposal, runDotnet, runNode } = require('../src/fixture-replay');
+const { TARGET_PATH, readControlledFixture, verifyPizzaProposal, verifySelectedNodeProposal, runDotnet, runNode } = require('../src/fixture-replay');
+const { inspectNodeTestProject, prepareNodeTestWorkspace, cleanupNodeTestWorkspace } = require('../src/node-test-workspace');
 
 const fixtureRoot = path.resolve(__dirname, '../../fixtures/dotnet');
 const fixturePaths = ['PizzaEligibility.sln', TARGET_PATH, 'src/PizzaEligibility/Program.cs',
@@ -312,7 +313,7 @@ test('report captures original pizza outputs and apply compares against that bas
   assert.equal(fixture.result.baselineObservations.transformed, null);
   const proposalReport = await fs.readFile(fixture.result.reportPath, 'utf8');
   assert.match(proposalReport, /Observed baseline inputs\/outputs: captured/);
-  assert.match(proposalReport, /Observed stdout:[\s\S]*2\.50/);
+  assert.match(proposalReport, /Captured Output \(stdout\)[\s\S]*2\.50/);
   fixture.result.mode = 'live';
   const result = await verifyPizzaProposal(fixture.result);
   assert.equal(result.status, 'passed', JSON.stringify(result));
@@ -348,11 +349,7 @@ test('real Node generation baseline is reused for transformed replay without cha
   const candidate = { target: { path: NODE_TARGET_PATH, symbol: 'transfer', source: {
     text: NODE_BASELINE, startLine: 3, startCharacter: 0, endLine: 2 + NODE_BASELINE.split('\n').length, endCharacter: 1
   } }, sourceSnapshot: { rootPath: root, text, bytes: bytes.toString('base64'), fileHash: hashBytes(bytes) },
-  mode: 'live', sampleInputs: [
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 25 },
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'alice', destinationId: 'bob', amount: 0 },
-    { accounts: [{ id: 'alice', balance: 100 }, { id: 'bob', balance: 50 }], sourceId: 'missing', destinationId: 'bob', amount: 1 }
-  ],
+  mode: 'live', sampleInputs: require('../src/sample-inputs').generateSampleInputs({ path: NODE_TARGET_PATH, symbol: 'transfer' }),
   proposal: { changes: [{ replacementText: NODE_REPLACEMENT.replace(
     '\n  if (!Object.hasOwn(accounts, sourceId))', '\n\n  if (!Object.hasOwn(accounts, sourceId))') }] } };
   assert.notEqual(candidate.proposal.changes[0].replacementText, NODE_REPLACEMENT);
@@ -364,8 +361,8 @@ test('real Node generation baseline is reused for transformed replay without cha
   assert.equal(verification.status, 'passed', JSON.stringify(verification));
   assert.equal(verification.baseline.cases.length, 9);
   assert.equal(verification.transformed.cases.length, 9);
-  assert.equal(verification.baseline.suggestedCases.length, 3);
-  assert.equal(verification.transformed.suggestedCases.length, 3);
+  assert.equal(verification.baseline.suggestedCases.length, 8);
+  assert.equal(verification.transformed.suggestedCases.length, 8);
   assert.ok(verification.baseline.suggestedCases.every((item) => item.passed));
   assert.ok(verification.transformed.suggestedCases.every((item) => item.passed));
   assert.equal(JSON.parse(verification.baseline.tests.stdout).counts.passed, 8);
@@ -374,4 +371,279 @@ test('real Node generation baseline is reused for transformed replay without cha
   assert.deepEqual(await fs.readFile(path.join(originalRoot, NODE_TARGET_PATH)), bytes);
   await fs.appendFile(path.join(root, 'src/runner.js'), '\n');
   await assert.rejects(readControlledFixture(candidate), /fingerprint differs/);
+});
+
+test('Node test workspace installs one public locked tree and clones isolated copies', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-workspace-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const packageJson = { name: 'workspace-fixture', version: '1.0.0', devDependencies: { 'tiny-lib': '1.2.3' } };
+  const packageLock = {
+    name: packageJson.name, version: packageJson.version, lockfileVersion: 3,
+    packages: {
+      '': { name: packageJson.name, version: packageJson.version, devDependencies: packageJson.devDependencies },
+      'node_modules/tiny-lib': { version: '1.2.3', resolved: 'https://registry.npmjs.org/tiny-lib/-/tiny-lib-1.2.3.tgz' }
+    }
+  };
+  await fs.mkdir(path.join(projectRoot, 'tests'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, 'package.json'), JSON.stringify(packageJson));
+  await fs.writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify(packageLock));
+  await fs.writeFile(path.join(projectRoot, 'src.js'), 'module.exports = 1;\n');
+  await fs.writeFile(path.join(projectRoot, 'tests', 'sample.test.js'), "require('node:test').test('sample', () => {});\n");
+  await fs.writeFile(path.join(projectRoot, '.npmrc'), 'registry=https://private.example/\n');
+  await fs.writeFile(path.join(projectRoot, '.env'), 'SECRET=not-copied\n');
+  await fs.mkdir(path.join(projectRoot, 'node_modules', 'old-package'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, 'node_modules', 'old-package', 'index.js'), 'module.exports = 0;\n');
+
+  let npmCalls = 0;
+  let workspace;
+  try {
+    workspace = await prepareNodeTestWorkspace(projectRoot, 'tests/sample.test.js', {
+      nodeExecutable: 'node-test.exe', npmCliPath: 'npm-cli.js',
+      runVersion: async (_executable, args) => {
+        assert.deepEqual(args, ['--version']);
+        return { exitCode: 0, stdout: 'v24.19.3\n', stderr: '', reason: null };
+      },
+      runNpm: async ({ args, cwd, env }) => {
+        npmCalls += 1;
+        assert.ok(args.includes('ci'));
+        assert.ok(args.includes('--ignore-scripts'));
+        assert.ok(args.includes('--registry=https://registry.npmjs.org/'));
+        assert.equal(await fs.readFile(path.join(cwd, '.npmrc')).catch(() => null), null);
+        assert.equal(env.SECRET, undefined);
+        await fs.mkdir(path.join(cwd, 'node_modules', 'tiny-lib'), { recursive: true });
+        await fs.writeFile(path.join(cwd, 'node_modules', 'tiny-lib', 'index.js'), 'module.exports = {};\n');
+        return { exitCode: 0, stdout: 'installed', stderr: '', reason: null };
+      }
+    });
+    assert.equal(npmCalls, 1);
+    assert.equal(workspace.installRequired, true);
+    assert.equal(workspace.toolchain.runtimeVersion, 'v24.19.3');
+    assert.equal(workspace.packageCount, 1);
+    assert.equal(await fs.readFile(path.join(workspace.baselineRoot, 'tests/sample.test.js'), 'utf8'),
+      "require('node:test').test('sample', () => {});\n");
+    assert.equal(await fs.readFile(path.join(workspace.transformedRoot, 'tests/sample.test.js'), 'utf8'),
+      "require('node:test').test('sample', () => {});\n");
+    assert.equal(await fs.stat(path.join(workspace.baselineRoot, 'node_modules', 'tiny-lib', 'index.js')).then(() => true), true);
+    assert.equal(await fs.stat(path.join(workspace.transformedRoot, 'node_modules', 'tiny-lib', 'index.js')).then(() => true), true);
+    assert.equal(await fs.stat(path.join(workspace.baselineRoot, '.env')).catch(() => null), null);
+    assert.equal(await fs.stat(path.join(workspace.transformedRoot, '.npmrc')).catch(() => null), null);
+    assert.equal(await fs.stat(path.join(workspace.baselineRoot, 'node_modules', 'old-package')).catch(() => null), null);
+  } finally {
+    await cleanupNodeTestWorkspace(workspace);
+  }
+});
+
+test('Node test workspace rejects non-public locked tarballs before invoking npm', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-bad-lock-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const packageJson = { name: 'workspace-fixture', version: '1.0.0', dependencies: { 'tiny-lib': '1.2.3' } };
+  const packageLock = { lockfileVersion: 3, packages: {
+    '': { name: packageJson.name, version: packageJson.version, dependencies: packageJson.dependencies },
+    'node_modules/tiny-lib': { version: '1.2.3', resolved: 'https://packages.example/tiny-lib.tgz' }
+  } };
+  await fs.writeFile(path.join(projectRoot, 'package.json'), JSON.stringify(packageJson));
+  await fs.writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify(packageLock));
+  await fs.writeFile(path.join(projectRoot, 'test.test.js'), "require('node:test').test('sample', () => {});\n");
+  let npmCalls = 0;
+  await assert.rejects(prepareNodeTestWorkspace(projectRoot, 'test.test.js', {
+    runNpm: async () => { npmCalls += 1; return { exitCode: 0 }; }
+  }), /exact public npm tarball/);
+  assert.equal(npmCalls, 0);
+});
+
+test('Node test workspace rejects unsupported Node versions before installing dependencies', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-version-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const packageJson = { name: 'workspace-fixture', version: '1.0.0', dependencies: { 'tiny-lib': '1.2.3' } };
+  const packageLock = { lockfileVersion: 3, packages: {
+    '': { name: packageJson.name, version: packageJson.version, dependencies: packageJson.dependencies },
+    'node_modules/tiny-lib': { version: '1.2.3', resolved: 'https://registry.npmjs.org/tiny-lib/-/tiny-lib-1.2.3.tgz' }
+  } };
+  await fs.writeFile(path.join(projectRoot, 'package.json'), JSON.stringify(packageJson));
+  await fs.writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify(packageLock));
+  await fs.writeFile(path.join(projectRoot, 'test.test.js'), "require('node:test').test('sample', () => {});\n");
+  let npmCalls = 0;
+  await assert.rejects(prepareNodeTestWorkspace(projectRoot, 'test.test.js', {
+    nodeExecutable: 'node-test.exe',
+    runVersion: async () => ({ exitCode: 0, stdout: 'v24.20.0\n', stderr: '', reason: null }),
+    runNpm: async () => { npmCalls += 1; return { exitCode: 0 }; }
+  }), /Node\.js 24\.19\.x is required/);
+  assert.equal(npmCalls, 0);
+});
+
+test('selected Node test gates a generic target on baseline and transformed results', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-characterization-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const targetPath = 'src/value.js';
+  const testPath = 'tests/value.test.js';
+  const source = 'function value() { return 1; }\nmodule.exports = { value };\n';
+  const testSource = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { value } = require('../src/value.js');\ntest('value', () => assert.equal(value(), 1));\n";
+  await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await fs.mkdir(path.join(projectRoot, 'tests'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, targetPath), source);
+  await fs.writeFile(path.join(projectRoot, testPath), testSource);
+  const original = Buffer.from(source);
+  const targetText = source.split('\n')[0];
+  const candidate = {
+    id: 'selected-test-candidate', proposalHash: 'proposal-hash',
+    target: { path: targetPath, symbol: 'value', source: {
+      text: targetText, startLine: 1, startCharacter: 0, endLine: 1, endCharacter: targetText.length
+    } },
+    proposal: { changes: [{ path: targetPath, originalText: targetText,
+      replacementText: 'function value() { return 1; }', rationale: 'Keep behavior.' }] },
+    sourceSnapshot: { rootPath: projectRoot, path: targetPath, bytes: original.toString('base64'),
+      fileHash: require('../src/proposal-apply').hashBytes(original), text: source },
+    testFileSnapshot: { path: testPath, fileHash: require('../src/proposal-apply').hashBytes(Buffer.from(testSource)) }
+  };
+  const preflight = { ...await inspectNodeTestProject(projectRoot, testPath),
+    nodeExecutable: process.execPath, runtimeVersion: process.version };
+
+  const result = await verifySelectedNodeProposal(candidate, undefined, preflight);
+
+  assert.equal(result.status, 'passed', JSON.stringify(result));
+  assert.equal(result.baseline.summary.tests, 1);
+  assert.equal(result.baseline.passed, true);
+  assert.equal(result.transformed.summary.tests, 1);
+  assert.equal(result.transformed.passed, true);
+  assert.deepEqual(await fs.readFile(path.join(projectRoot, targetPath)), original);
+});
+
+test('selected Node test baseline failure prevents transformed execution', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-baseline-failure-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const targetPath = 'value.js';
+  const testPath = 'value.test.js';
+  const source = 'module.exports = () => false;\n';
+  const testSource = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst value = require('./value.js');\ntest('value', () => assert.equal(value(), true));\n";
+  await fs.writeFile(path.join(projectRoot, targetPath), source);
+  await fs.writeFile(path.join(projectRoot, testPath), testSource);
+  const original = Buffer.from(source);
+  const candidate = {
+    target: { path: targetPath, symbol: 'value', source: { text: source.trimEnd(),
+      startLine: 1, startCharacter: 0, endLine: 1, endCharacter: source.trimEnd().length } },
+    proposal: { changes: [{ path: targetPath, originalText: source.trimEnd(),
+      replacementText: 'module.exports = () => true;', rationale: 'Fix behavior.' }] },
+    sourceSnapshot: { rootPath: projectRoot, path: targetPath, bytes: original.toString('base64'),
+      fileHash: require('../src/proposal-apply').hashBytes(original), text: source },
+    testFileSnapshot: { path: testPath, fileHash: require('../src/proposal-apply').hashBytes(Buffer.from(testSource)) }
+  };
+  const preflight = { ...await inspectNodeTestProject(projectRoot, testPath),
+    nodeExecutable: process.execPath, runtimeVersion: process.version };
+
+  const result = await verifySelectedNodeProposal(candidate, undefined, preflight);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.baseline.passed, false);
+  assert.equal(result.transformed, null);
+  assert.deepEqual(await fs.readFile(path.join(projectRoot, targetPath)), original);
+});
+
+test('selected Node test transformed failure leaves the original target unchanged', async (context) => {
+  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-transformed-failure-'));
+  context.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
+  const targetPath = 'value.js';
+  const testPath = 'value.test.js';
+  const source = 'module.exports = () => 1;\n';
+  const targetText = source.trimEnd();
+  const testSource = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst value = require('./value.js');\ntest('value', () => assert.equal(value(), 1));\n";
+  await fs.writeFile(path.join(projectRoot, targetPath), source);
+  await fs.writeFile(path.join(projectRoot, testPath), testSource);
+  const original = Buffer.from(source);
+  const candidate = {
+    target: { path: targetPath, symbol: 'value', source: { text: targetText,
+      startLine: 1, startCharacter: 0, endLine: 1, endCharacter: targetText.length } },
+    proposal: { changes: [{ path: targetPath, originalText: targetText,
+      replacementText: 'module.exports = () => 2;', rationale: 'Change the result.' }] },
+    sourceSnapshot: { rootPath: projectRoot, path: targetPath, bytes: original.toString('base64'),
+      fileHash: require('../src/proposal-apply').hashBytes(original), text: source },
+    testFileSnapshot: { path: testPath, fileHash: require('../src/proposal-apply').hashBytes(Buffer.from(testSource)) }
+  };
+  const preflight = { ...await inspectNodeTestProject(projectRoot, testPath),
+    nodeExecutable: process.execPath, runtimeVersion: process.version };
+
+  const result = await verifySelectedNodeProposal(candidate, undefined, preflight);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.baseline.passed, true);
+  assert.equal(result.transformed.passed, false);
+  assert.deepEqual(await fs.readFile(path.join(projectRoot, targetPath)), original);
+});
+
+test('approved selected Node test applies a generic target after both runs pass', async (context) => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'lcta-node-apply-'));
+  const projectRoot = await fs.realpath(temporaryRoot);
+  context.after(() => fs.rm(temporaryRoot, { recursive: true, force: true }));
+  const targetPath = 'src/value.js';
+  const testPath = 'tests/value.test.js';
+  const source = 'function value() { return 1; }\nmodule.exports = { value };\n';
+  const testSource = "const test = require('node:test');\nconst assert = require('node:assert/strict');\nconst { value } = require('../src/value.js');\ntest('value', () => assert.equal(value(), 1));\n";
+  await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await fs.mkdir(path.join(projectRoot, 'tests'), { recursive: true });
+  await fs.mkdir(path.join(projectRoot, 'reports'), { recursive: true });
+  await fs.writeFile(path.join(projectRoot, targetPath), source);
+  await fs.writeFile(path.join(projectRoot, testPath), testSource);
+  const reportPath = path.join(projectRoot, 'reports', 'proposal.md');
+  const report = '# Reviewed proposal\n';
+  await fs.writeFile(reportPath, report);
+  const sourceBytes = Buffer.from(source);
+  const targetText = source.split('\n')[0];
+  const targetHash = require('../src/proposal-apply').hashBytes(sourceBytes);
+  const proposal = {
+    summary: 'Keep the selected calculation.',
+    target: { path: targetPath, symbol: 'value' },
+    evidence: [{ id: 'E1', path: targetPath, startLine: 1, endLine: 1, claim: 'The function returns one.' }],
+    changes: [{ path: targetPath, originalText: targetText,
+      replacementText: 'function value() { return 1; }', rationale: 'Preserve the existing behavior.' }],
+    unknowns: ['Only the selected test was run.']
+  };
+  const evidenceCatalog = [{ id: 'E1', path: targetPath, startLine: 1, endLine: 1, content: targetText, kind: 'target' }];
+  const result = {
+    status: 'ready', proposal, target: { ...proposal.target, source: {
+      text: targetText, startLine: 1, startCharacter: 0, endLine: 1, endCharacter: targetText.length
+    } },
+    evidenceCatalog, proposalHash: require('../src/proposal-apply').hashBytes(JSON.stringify(proposal)),
+    evidenceHash: require('../src/proposal-apply').hashBytes(JSON.stringify(evidenceCatalog)),
+    targetSpanHash: require('../src/proposal-apply').hashBytes(targetText), sampleInputs: [], mode: 'live',
+    sourceSnapshot: { rootPath: projectRoot, path: targetPath, bytes: sourceBytes.toString('base64'),
+      fileHash: targetHash, text: source, version: 1 },
+    testFileSnapshot: { rootPath: projectRoot, path: testPath,
+      bytes: Buffer.from(testSource).toString('base64'),
+      fileHash: require('../src/proposal-apply').hashBytes(Buffer.from(testSource)), version: 1 },
+    reportPath, reportHash: require('../src/proposal-apply').hashBytes(Buffer.from(report))
+  };
+  const uriFor = (filePath) => ({ scheme: 'file', authority: '', fsPath: filePath, path: filePath.split(path.sep).join('/') });
+  const vscode = {
+    workspace: {
+      workspaceFolders: [{ uri: uriFor(projectRoot) }], textDocuments: [],
+      openTextDocument: async (filePath) => ({ uri: uriFor(filePath), version: 1, isDirty: false })
+    },
+    window: { showWarningMessage: async (_message, options) => {
+      assert.equal(options.modal, true);
+      assert.match(options.detail, /Selected local test: tests\/value\.test\.js/);
+      assert.match(options.detail, /Node runtime: v24\.19\.0/);
+      assert.match(options.detail, /Lockfile: not required/);
+      assert.match(options.detail, /Install: not required/);
+      assert.match(options.detail, /Registry: not accessed/);
+      assert.match(options.detail, /Baseline: node --test --test-reporter=tap/);
+      assert.match(options.detail, /Transformed: node --test --test-reporter=tap/);
+      assert.match(options.detail, /stdout\/stderr capped at 1 MiB per run/);
+      assert.match(options.detail, /not an OS sandbox/);
+      return APPLY_LABEL;
+    } }
+  };
+  const originalPath = process.env.PATH;
+  process.env.PATH = [path.dirname(process.execPath), originalPath].filter(Boolean).join(path.delimiter);
+  try {
+    const store = new ProposalCandidateStore();
+    const proposalId = await store.add(vscode, result);
+    const applied = await store.apply(vscode, proposalId);
+    assert.equal(applied.status, 'applied');
+    assert.equal(await fs.readFile(path.join(projectRoot, targetPath), 'utf8'),
+      'function value() { return 1; }\nmodule.exports = { value };\n');
+    const verificationReport = await fs.readFile(applied.verificationReportPath, 'utf8');
+    assert.match(verificationReport, /Verification: passed/);
+    assert.match(verificationReport, /"runtimeVersion": "v24\.19\.0"/);
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });

@@ -26,6 +26,16 @@ function contentHash(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+async function captureSelectedTest(vscode, rootPath, targetSnapshot, relativePath) {
+  if (relativePath === undefined) return null;
+  if (!/\.(?:js|cjs|mjs)$/i.test(targetSnapshot.path)) throw new Error('A Node test file can only be paired with a Node target.');
+  validateRelativePath(relativePath);
+  if (!/\.(?:js|cjs|mjs)$/i.test(relativePath)) throw new Error('The selected Node test must be a .js, .cjs, or .mjs file.');
+  const snapshot = await captureSourceSnapshot(vscode, rootPath, path.join(rootPath, ...relativePath.split('/')));
+  if (snapshot.path === targetSnapshot.path) throw new Error('The selected test file must be different from the target source file.');
+  return snapshot;
+}
+
 function validateReportDirectory(directory, sourcePaths = []) {
   validateRelativePath(directory);
   const blocked = new Set(['node_modules', 'deps', 'dependencies', 'vendor', 'packages', 'bin', 'obj', 'dist', 'build', 'coverage', 'src', 'source', 'sources', 'lib', 'tests', 'test', 'docs', 'agents', 'fixtures', 'roslyn-worker']);
@@ -100,11 +110,13 @@ async function writeProposalReport(rootPath, directory, markdown, token, sourceP
   }
 }
 
-async function collectEvidence(vscode, root, discovery, token) {
+async function collectEvidence(vscode, root, discovery, token, excludedPaths = []) {
   const evidenceCatalog = [];
   const seen = new Set();
+  const excluded = new Set(excludedPaths);
   const read = async (request, kind, optional = false) => {
     checkCancelled(token);
+    if (excluded.has(request.path)) return;
     const key = `${request.path}:${request.startLine}:${request.endLine}`;
     if (seen.has(key) || evidenceCatalog.length >= 40) return;
     seen.add(key);
@@ -162,13 +174,15 @@ async function generateProposalReport(vscode, input, token, options = {}) {
     validateReportDirectory(directory);
     await verifyAncestors(root.realPath, directory);
     const sourceSnapshot = await captureSourceSnapshot(vscode, root.realPath, input.targetFile);
+    const testFileSnapshot = await captureSelectedTest(vscode, root.realPath, sourceSnapshot, input.testFile);
     const discovery = await discoverTarget(vscode, {
       projectRoot: root.realPath, targetFile: input.targetFile, targetSymbol: input.targetSymbol
     }, token, options.roslynAnalyzer);
     if (discovery.status === 'cancelled') return { status: 'cancelled' };
     if (discovery.status !== 'ready') throw new Error('Discovery did not return usable evidence.');
     validateReportDirectory(directory, discovery.files);
-    const { target, evidenceCatalog } = await collectEvidence(vscode, root, discovery, token);
+    const { target, evidenceCatalog } = await collectEvidence(vscode, root, discovery, token,
+      testFileSnapshot ? [testFileSnapshot.path] : []);
     const generated = await generateModelProposal({ target, evidenceCatalog }, {
       vscode, token, env: options.env, fetchImpl: options.fetchImpl, timeoutMs: options.timeoutMs,
       changeRequest: input.changeRequest
@@ -190,14 +204,14 @@ async function generateProposalReport(vscode, input, token, options = {}) {
     const evidenceHash = contentHash(JSON.stringify(evidenceCatalog));
     const markdown = renderProposalReport(proposal, evidenceCatalog, target, {
       mode: generated.mode, discovery, proposalHash, targetSpanHash, evidenceHash, sampleInputs, expectedSampleCase,
-      baselineObservations,
+      baselineObservations, testFileSnapshot,
       changeRequest: generated.changeRequest
     });
     const reportPath = await writeProposalReport(root.realPath, directory, markdown, token, discovery.files);
     await assertSourceSnapshot(vscode, sourceSnapshot);
     return { status: 'ready', reportPath, reportHash: contentHash(Buffer.from(markdown, 'utf8')),
       proposal, target, evidenceCatalog, sampleInputs, proposalHash, targetSpanHash, evidenceHash, sourceSnapshot,
-      baselineObservations, mode: generated.mode, changeRequest: generated.changeRequest };
+      baselineObservations, testFileSnapshot, mode: generated.mode, changeRequest: generated.changeRequest };
   } catch (error) {
     if (error.code === 'CANCELLED' || token?.isCancellationRequested) return { status: 'cancelled' };
     throw error;

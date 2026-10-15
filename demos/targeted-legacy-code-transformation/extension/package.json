@@ -15,7 +15,7 @@
     "onStartupFinished"
   ],
   "scripts": {
-    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-discovery.js && node --check src/source-evidence.js && node --check src/roslyn-worker.js && node --check src/proposal-contract.js && node --check src/foundry-adapter.js && node --check src/proposal-report.js && node --check src/proposal-apply.js && node --check src/fixture-replay.js && node --check src/node-fixture.js",
+    "check": "node --check src/extension.js && node --check src/workspace-scope.js && node --check src/workspace-discovery.js && node --check src/source-evidence.js && node --check src/roslyn-worker.js && node --check src/proposal-contract.js && node --check src/foundry-adapter.js && node --check src/proposal-report.js && node --check src/proposal-apply.js && node --check src/fixture-replay.js && node --check src/node-test-workspace.js && node --check src/node-fixture.js",
     "test": "node --test"
   },
   "contributes": {
@@ -50,35 +50,67 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_code_transformation_demo_generate_proposal_report",
         "displayName": "Generate a source-grounded proposal report",
-        "modelDescription": "Always use the configured Live Azure OpenAI/Foundry deployment. Recollect bounded saved source and evidence, apply the requested refactor to one selected target, validate the exact proposal, and write a unique Markdown report after extension-owned confirmation. Require api_key, model, and endpoint in the extension-host environment, plus separate source-sharing consent showing the exact request and context. For the pinned pizza and Node fixtures, run baseline tests and generated sample cases in disposable copies and include observed outputs; never execute arbitrary project code. No source writes during generation. Returns the change request, candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply.",
-        "userDescription": "Confirm report creation, review the generated report, then separately approve application if wanted.",
+        "modelDescription": "Always use the configured Live Azure OpenAI/Foundry deployment. Recollect bounded saved source and evidence, apply the requested refactor to one selected target, validate the exact proposal, and write a unique Markdown report after extension-owned confirmation. Require api_key, model, and endpoint in the extension-host environment, plus separate source-sharing consent showing the exact request and context. Without a selected test, pinned pizza and Node fixtures retain their controlled baseline checks. If a project-relative Node testFile is supplied, snapshot its path and hash locally, exclude its contents from Foundry context, and defer all test execution to confirmed apply. No source writes during generation. Returns the change request, candidate ID, hashes and report path only, never caller patches. Read the report and exact diff and ask the user before invoking ID-only apply.",
+        "userDescription": "Optionally provide one in-root Node test path; confirm report creation, review the generated report, then separately approve application if wanted.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-            "required": ["projectRoot", "targetFile", "targetSymbol"],
+          "required": [
+            "projectRoot",
+            "targetFile",
+            "targetSymbol"
+          ],
           "properties": {
-            "projectRoot": { "type": "string", "description": "Absolute path exactly matching an opened project workspace folder." },
-            "targetFile": { "type": "string", "description": "Absolute saved source file path inside projectRoot." },
-            "targetSymbol": { "type": "string", "description": "Exact selected function, method or class name." },
-            "changeRequest": { "type": "string", "maxLength": 1000, "description": "Optional desired refactor, passed only in Live mode. Defaults to improving readability and maintainability while preserving behavior." }
+            "projectRoot": {
+              "type": "string",
+              "description": "Absolute path exactly matching an opened project workspace folder."
+            },
+            "targetFile": {
+              "type": "string",
+              "description": "Absolute saved source file path inside projectRoot."
+            },
+            "targetSymbol": {
+              "type": "string",
+              "description": "Exact selected function, method or class name."
+            },
+            "changeRequest": {
+              "type": "string",
+              "maxLength": 1000,
+              "description": "Optional desired refactor, passed only in Live mode. Defaults to improving readability and maintainability while preserving behavior."
+            },
+            "testFile": {
+              "type": "string",
+              "maxLength": 1024,
+              "description": "Optional normalized project-relative .js, .cjs, or .mjs test file for local Node characterization. Its contents are not sent to Foundry."
+            }
           }
         },
-        "tags": ["proposalBound"]
+        "tags": [
+          "proposalBound"
+        ]
       },
       {
         "name": "legacy_code_transformation_demo_apply_proposal",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "legacy_code_transformation_demo_apply_proposal",
         "displayName": "Review and apply stored proposal",
-        "modelDescription": "Accept only an extension-owned proposal ID from generation in this session after the user reviews the report and requests application. Mandatory extension modal shows exact file, original, replacement, diff and hashes, independently of tool auto-approval. Applies only known hash-verified pizza or Node replacements after disposable before/after tests and replay. No caller patches or approval flags.",
-        "userDescription": "Confirm an exact stored proposal, verify controlled fixture behavior on a disposable copy, then apply only if source and report remain current.",
+        "modelDescription": "Accept only an extension-owned proposal ID from generation in this session after the user reviews the report and requests application. Mandatory extension modal shows exact file, original, replacement, diff and hashes, independently of tool auto-approval. Applies pinned fixture replacements through controlled replay, or one exact in-root Node target span with a selected local node:test file after passing baseline and transformed runs. No caller patches or approval flags.",
+        "userDescription": "Confirm the exact stored proposal and any selected Node test runs, then apply only if both tests and source/report freshness checks pass.",
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["proposalId"],
-          "properties": { "proposalId": { "type": "string" } }
+          "required": [
+            "proposalId"
+          ],
+          "properties": {
+            "proposalId": {
+              "type": "string"
+            }
+          }
         },
-        "tags": ["proposalBound"]
+        "tags": [
+          "proposalBound"
+        ]
       },
       {
         "name": "legacy_code_transformation_demo_discover_target",
@@ -90,7 +122,11 @@
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["projectRoot", "targetFile", "targetSymbol"],
+          "required": [
+            "projectRoot",
+            "targetFile",
+            "targetSymbol"
+          ],
           "properties": {
             "projectRoot": {
               "type": "string",
@@ -106,7 +142,9 @@
             }
           }
         },
-        "tags": ["readOnly"]
+        "tags": [
+          "readOnly"
+        ]
       },
       {
         "name": "legacy_code_transformation_demo_read_source_evidence",
@@ -118,7 +156,10 @@
         "inputSchema": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["projectRoot", "requests"],
+          "required": [
+            "projectRoot",
+            "requests"
+          ],
           "properties": {
             "projectRoot": {
               "type": "string",
@@ -129,7 +170,11 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["path", "startLine", "endLine"],
+                "required": [
+                  "path",
+                  "startLine",
+                  "endLine"
+                ],
                 "properties": {
                   "path": {
                     "type": "string",
@@ -150,7 +195,9 @@
             }
           }
         },
-        "tags": ["readOnly"]
+        "tags": [
+          "readOnly"
+        ]
       }
     ]
   }

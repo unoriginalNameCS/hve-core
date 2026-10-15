@@ -195,6 +195,41 @@ function textFence(value) {
   return `${fence}text\n${value}\n${fence}`;
 }
 
+function renderBaselineAnalysis(context) {
+  if (!context?.sampleInputs?.length) return [];
+  const observations = context.baselineObservations?.baseline?.suggestedCases ?? [];
+  const cell = (value) => codeSpan(value).replaceAll('|', '&#124;');
+  const lines = ['## Characterization Baseline Analysis', '',
+    'Captured outputs below are observations of the original code, not predictions from the model. Use them with the existing tests and exact diff during human review.', '',
+    '| Case | Sample Input | Captured Output (stdout) | stderr | Exit Code |',
+    '| --- | --- | --- | --- | --- |'];
+  let accepted = 0;
+  let unchangedRejections = 0;
+  let captured = 0;
+  for (const [index, input] of context.sampleInputs.entries()) {
+    const observed = observations[index];
+    lines.push(`| ${index + 1} | ${cell(JSON.stringify(input))} | ${observed ? cell(observed.stdout) : 'Not captured'} | ${observed ? cell(observed.stderr || '(empty)') : 'Not captured'} | ${observed ? cell(observed.exitCode) : 'Not captured'} |`);
+    if (!observed) continue;
+    captured += 1;
+    try {
+      const output = JSON.parse(observed.stdout);
+      if (output.result?.accepted === true) accepted += 1;
+      if (output.result?.accepted === false && Array.isArray(input.accounts)) {
+        const originalBalances = Object.fromEntries(input.accounts.map(({ id, balance }) => [id, balance]));
+        if (JSON.stringify(output.balances) === JSON.stringify(originalBalances)) unchangedRejections += 1;
+      }
+    } catch {}
+  }
+  lines.push('', '### Implications For Review', '',
+    `* ${captured} of ${context.sampleInputs.length} characterization outputs were captured. Missing observations are not a passing baseline.`);
+  if (accepted || unchangedRejections) {
+    lines.push(`* Observed ${accepted} accepted transfers and ${unchangedRejections} rejected transfers with unchanged balances. Preserve these return values and balance outcomes in the refactor.`);
+  }
+  lines.push('* Check the exact rejection reasons in the table. These individual cases do not prove validation precedence for inputs with multiple invalid conditions.',
+    '* After human approval, replay the same inputs against the refactor and compare with these captured outputs alongside the existing tests. Sampled agreement is not general equivalence.', '');
+  return lines;
+}
+
 function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collectedContext) {
   const validation = validateProposal(proposal, evidenceCatalog, expectedTarget);
   if (!validation.valid) {
@@ -206,6 +241,13 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
     '# Legacy Code Refactor Proposal',
     ''
   ];
+
+  if (collectedContext?.testFileSnapshot) {
+    lines.push('## Selected Node Test', '',
+      `Test file: ${codeSpan(collectedContext.testFileSnapshot.path)}`,
+      `Test file SHA-256: ${codeSpan(collectedContext.testFileSnapshot.fileHash)}`,
+      'Test contents were kept local and were not included in the Foundry request.', '');
+  }
 
   if (collectedContext?.changeRequest) {
     lines.push('## Requested Refactor', '', escapeText(collectedContext.changeRequest), '');
@@ -231,33 +273,11 @@ function renderProposalReport(proposal, evidenceCatalog, expectedTarget, collect
     lines.push('', textFence(source.content));
   }
 
-  lines.push('', '## Proposed Changes', '');
+  lines.push('', ...renderBaselineAnalysis(collectedContext), '## Proposed Changes', '');
   if (proposal.changes.length === 0) lines.push('No changes proposed.', '');
   for (const [index, change] of proposal.changes.entries()) {
     lines.push(`### Change ${index + 1}: ${codeSpan(change.path)}`, '');
     lines.push(`Rationale: ${escapeText(change.rationale)}`, '', 'Original:', '', textFence(change.originalText), '', 'Replacement:', '', textFence(change.replacementText), '');
-  }
-
-  if (collectedContext?.sampleInputs?.length) {
-    const observedCases = collectedContext.baselineObservations?.baseline?.suggestedCases ?? [];
-    const baselineCaptured = observedCases.length === collectedContext.sampleInputs.length;
-    lines.push('## Supplemental Sample Inputs', '',
-      baselineCaptured ?
-        'The extension generated these bounded inputs from the selected fixture function and its documented behavior. Expected results are calculated by extension-owned fixture rules. Observed outputs below come from running the original pinned fixture before any source change.' :
-        'The extension generated these bounded inputs from the selected fixture function and its documented behavior. Expected results are calculated by extension-owned fixture rules. These cases have not run yet.', '');
-    for (const [index, sample] of collectedContext.sampleInputs.entries()) {
-      lines.push(`### Sample ${index + 1}`, '',
-        `Input: ${textFence(JSON.stringify(sample, null, 2))}`, '',
-        `Expected by fixture rules: ${textFence(JSON.stringify(collectedContext.expectedSampleCase(expectedTarget, sample), null, 2))}`, '');
-      const observed = observedCases[index];
-      if (observed) {
-        lines.push(`Observed exit code: ${observed.exitCode}`, '',
-          `Observed stdout: ${textFence(observed.stdout)}`, '',
-          `Observed stderr: ${textFence(observed.stderr)}`, '');
-      } else {
-        lines.push('Observed output: not captured.', '');
-      }
-    }
   }
 
   lines.push('## Unknowns', '');
