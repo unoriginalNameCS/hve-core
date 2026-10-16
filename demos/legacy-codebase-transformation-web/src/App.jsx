@@ -449,7 +449,9 @@ export default function App() {
       setSelectedUnits(new Set());
       setApprovedFindings(new Set());
       setActiveLine(null);
-      setFocusedUnitId(result.assessment.hotspots[0]?.id ?? result.assessment.units[0]?.id ?? null);
+      const firstVisibleUnit = result.assessment.files.flatMap((file) => file.units)
+        .find((unit) => unit.findings.length > 0);
+      setFocusedUnitId(firstVisibleUnit?.id ?? result.assessment.units[0]?.id ?? null);
       setStage('assessment');
     } catch (requestError) {
       setError(requestError.message || 'The project could not be assessed.');
