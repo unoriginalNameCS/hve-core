@@ -6,13 +6,14 @@ const express = require('express');
 const {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
-  analyzePreparedUpload,
   applyApprovedFindings,
   getSession,
+  getTransformProgress,
   prepareApprovedUpdate,
   prepareUpload,
   removeSession,
-  runApprovedUpdateBuild
+  runApprovedUpdateBuild,
+  transformUnits
 } = require('./workflow');
 const { getFoundryConfiguration } = require('./foundry-client');
 
@@ -20,13 +21,19 @@ const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
 function renderChangeReport(report) {
   const lines = [
-    '# Transformation Report',
+    '# Technical Debt Transformation Report',
+    '',
+    `Assessment before: ${report.before?.rating ?? 'not available'} | ${report.before?.debtMinutes ?? 0} debt minutes (${report.before?.debtHours ?? 0}h)`,
+    `Assessment after: ${report.after?.rating ?? 'not available'} | ${report.after?.debtMinutes ?? 0} debt minutes (${report.after?.debtHours ?? 0}h)`,
     '',
     `Source changes: ${report.sourceChanges.length}`,
     `Package updates: ${report.packageChanges.length}`,
     `Lock entries changed: ${report.lockChanges.length + report.omittedLockChanges}`,
     `Build: ${report.build?.status ?? 'not run'}`,
-    `Tests: ${report.tests}`,
+    ...(report.build?.characterisation ? [`Characterisation after dependency update: ${report.build.characterisation.status}${report.build.characterisation.results.map((item) => ` | ${item.name} ${item.matched}/${item.total}`).join('')}`] : []),
+    `Project tests: not run`,
+    `Characterisation tests: ${report.tests}`,
+    ...(report.testFiles?.length ? ['', 'Characterisation test files (run with `node --test`):', ...report.testFiles.map((file) => `- ${file}`)] : []),
     ''
   ];
 
@@ -34,7 +41,21 @@ function renderChangeReport(report) {
     lines.push(`## ${change.path} - ${change.symbol}`, '',
       `Lines ${change.startLine}-${change.endLine} | ${change.category}`, '',
       change.rationale, '', '### Before', '', '```text', change.before, '```', '',
-      '### After', '', '```text', change.after, '```', '');
+      '### After', '', '```text', change.after, '```', '', '### Static Gates', '');
+    for (const item of change.gates ?? []) lines.push(`- ${item.status}: ${item.id} - ${item.message}`);
+    if (change.residualFindings?.length) {
+      lines.push('', '### Remaining Findings', '');
+      for (const finding of change.residualFindings) lines.push(`- ${finding.severity}: ${finding.ruleId} - ${finding.message}`);
+    }
+    if (change.baseline?.cases?.length) {
+      lines.push('', '### Characterisation Cases', '');
+      for (const item of change.comparison?.cases ?? []) {
+        lines.push(`- ${item.passed ? 'PASS' : 'FAIL'} ${item.description}`, '',
+          `Input: \`${JSON.stringify(item.args)}\``, '',
+          'Expected:', '', '```json', JSON.stringify(item.expected, null, 2), '```', '',
+          'Actual:', '', '```json', JSON.stringify(item.actual, null, 2), '```', '');
+      }
+    } else lines.push('', `Characterisation: ${change.baseline?.reason ?? 'not checked'}`, '');
   }
 
   if (report.packageChanges.length) {
@@ -141,7 +162,7 @@ function createApiApp(options = {}) {
   app.get('/api/status', (_request, response) => {
     try {
       const config = getFoundryConfiguration(options.env);
-      response.json({ configured: true, model: config.model });
+      response.json({ configured: true, model: config.model, rewriteModel: config.rewriteModel });
     } catch {
       response.json({ configured: false, model: options.env?.FOUNDRY_MODEL || process.env.FOUNDRY_MODEL || 'gpt-4.1-mini' });
     }
@@ -158,11 +179,12 @@ function createApiApp(options = {}) {
     }
   });
 
-  app.post('/api/sessions/:sessionId/analyze', async (request, response) => {
-    const decisions = request.body;
-    if (!decisions || Object.keys(decisions).some((key) => !['sourceApproved', 'dependencyApproved'].includes(key)) ||
-        typeof decisions.sourceApproved !== 'boolean' || typeof decisions.dependencyApproved !== 'boolean') {
-      response.status(400).json({ error: 'Confirm source sharing and npm metadata sharing.' });
+  app.post('/api/sessions/:sessionId/transform', async (request, response) => {
+    const input = request.body;
+    if (!input || Object.keys(input).some((key) => !['unitIds', 'findingIds', 'checkDependencies', 'approved'].includes(key)) ||
+        !Array.isArray(input.unitIds) || (input.findingIds !== undefined && !Array.isArray(input.findingIds)) ||
+        (input.checkDependencies !== undefined && typeof input.checkDependencies !== 'boolean') || input.approved !== true) {
+      response.status(400).json({ error: 'Approve the disclosed source transfer, dependency assessment, and local characterization execution.' });
       return;
     }
     const session = getSession(request.params.sessionId);
@@ -170,29 +192,44 @@ function createApiApp(options = {}) {
       response.status(404).json({ error: 'This upload preview expired. Select the folder again.' });
       return;
     }
-    let config;
-    if (decisions.sourceApproved && session.chunks.length) {
-      try { config = getFoundryConfiguration(options.env); } catch (error) {
-        response.status(503).json({ error: error.message });
-        return;
-      }
+    let config = options.config;
+    try {
+      config ??= getFoundryConfiguration(options.env);
+    } catch (error) {
+      response.status(503).json({ error: error.message });
+      return;
     }
     try {
-      const result = await analyzePreparedUpload(request.params.sessionId, decisions, {
+      const result = await transformUnits(request.params.sessionId, input, {
         config,
-        env: options.env,
-        requestFindings: options.requestFindings,
-        metadataFetchImpl: options.metadataFetchImpl
+        requestStructured: options.requestStructured,
+        transformUnit: options.transformUnit,
+        fetchImpl: options.fetchImpl,
+        metadataFetchImpl: options.metadataFetchImpl,
+        runCharacterisationCommand: options.runCharacterisationCommand
       });
       response.json(result);
     } catch (error) {
-      response.status(error.statusCode || 400).json({ error: error.message || 'The analysis could not be completed.' });
+      response.status(error.statusCode || 400).json({ error: error.message || 'The selected units could not be transformed.' });
     }
   });
 
-  app.post('/api/sessions/:sessionId/apply', (request, response) => {
+  app.get('/api/sessions/:sessionId/progress', (request, response) => {
+    try { response.json(getTransformProgress(request.params.sessionId)); }
+    catch (error) { response.status(error.statusCode || 400).json({ error: error.message }); }
+  });
+
+  app.post('/api/sessions/:sessionId/apply', async (request, response) => {
+    const input = request.body;
+    if (!input || Object.keys(input).some((key) => !['approvedProposalIds', 'acknowledgedWarnings'].includes(key)) ||
+        !Array.isArray(input.approvedProposalIds) || !Array.isArray(input.acknowledgedWarnings ?? [])) {
+      response.status(400).json({ error: 'Provide selected proposal IDs and not-checked warning acknowledgements.' });
+      return;
+    }
     try {
-      const result = applyApprovedFindings(request.params.sessionId, request.body?.approvedFindingIds);
+      const result = await applyApprovedFindings(request.params.sessionId, input.approvedProposalIds, input.acknowledgedWarnings ?? [], {
+        runCharacterisationCommand: options.runCharacterisationCommand
+      });
       response.json(result);
     } catch (error) {
       response.status(error.statusCode || 400).json({ error: error.message });
@@ -201,14 +238,17 @@ function createApiApp(options = {}) {
 
   app.post('/api/sessions/:sessionId/updates/prepare', async (request, response) => {
     const input = request.body;
-    if (!input || Object.keys(input).some((key) => !['approvedFindingIds', 'selectedUpdateNames'].includes(key)) ||
-        !Array.isArray(input.approvedFindingIds) || !Array.isArray(input.selectedUpdateNames)) {
-      response.status(400).json({ error: 'Provide approved finding IDs and selected dependency names.' });
+    if (!input || Object.keys(input).some((key) => !['approvedProposalIds', 'acknowledgedWarnings', 'selectedUpdateNames'].includes(key)) ||
+        !Array.isArray(input.approvedProposalIds) || !Array.isArray(input.acknowledgedWarnings ?? []) || !Array.isArray(input.selectedUpdateNames)) {
+      response.status(400).json({ error: 'Provide approved proposal IDs, warning acknowledgements, and selected dependency names.' });
       return;
     }
     try {
-      const preview = await prepareApprovedUpdate(request.params.sessionId, input.approvedFindingIds,
-        input.selectedUpdateNames, { runCommand: options.runDependencyCommand });
+      const preview = await prepareApprovedUpdate(request.params.sessionId, input.approvedProposalIds,
+        input.selectedUpdateNames, input.acknowledgedWarnings ?? [], {
+          runCommand: options.runDependencyCommand,
+          runCharacterisationCommand: options.runCharacterisationCommand
+        });
       response.json(preview);
     } catch (error) {
       response.status(error.statusCode || 400).json({ error: error.message || 'The dependency update preview could not be prepared.' });
@@ -224,7 +264,7 @@ function createApiApp(options = {}) {
     }
     try {
       const result = await runApprovedUpdateBuild(request.params.sessionId, input.previewId,
-        { runCommand: options.runBuildCommand });
+        { runCommand: options.runBuildCommand, runCharacterisationCommand: options.runCharacterisationCommand });
       response.json(result);
     } catch (error) {
       response.status(error.statusCode || 400).json({ error: error.message || 'The approved build could not be run.' });
@@ -252,7 +292,7 @@ function createApiApp(options = {}) {
     });
     archive.pipe(response);
     for (const [relativePath, bytes] of session.files) archive.append(bytes, { name: relativePath });
-    if (session.changeReport) archive.append(renderChangeReport(session.changeReport), { name: 'TRANSFORMATION-REPORT.md' });
+    if (session.changeReport) archive.append(renderChangeReport(session.changeReport), { name: 'TECH-DEBT-REPORT.md' });
     archive.finalize();
     return undefined;
   });

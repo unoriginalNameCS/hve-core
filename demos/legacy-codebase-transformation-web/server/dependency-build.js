@@ -286,6 +286,10 @@ module.exports = {
   MAX_OUTPUT_BYTES,
   MAX_RESOLUTION_MS,
   normalizeUpdates,
+  npmOptions,
+  processEnvironment,
   prepareDependencyBuild,
-  runApprovedBuild
+  runNpm,
+  runApprovedBuild,
+  writeProjectFiles
 };

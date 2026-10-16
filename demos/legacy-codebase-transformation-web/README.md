@@ -1,216 +1,197 @@
 ---
-title: Standalone Codebase Transformation Demo
-description: Run a local React workflow that reviews uploaded source with Microsoft Foundry and exports only approved changes.
+title: Technical Debt Assessor Demo
+description: Run a local JavaScript debt assessment and approve selected Foundry-proposed refactors with static and characterisation gates.
 ---
 
 ## Run The Demo
 
-Requirements: Node.js 24 or later and a deployed Microsoft Foundry chat model. The default deployment name is `gpt-4.1-mini`.
+Requirements: Node.js 24 or later and a deployed Microsoft Foundry chat model for transformation. Local assessment works without Foundry configuration.
 
-From the repository root, enter the web demo folder. Create `.env` only if you do not already have one:
+From the repository root, enter the demo folder. Create `.env` only if you do not already have one:
 
 ```powershell
 Set-Location demos/legacy-codebase-transformation-web
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Set `FOUNDRY_API_KEY`, `FOUNDRY_ENDPOINT`, and `FOUNDRY_MODEL` in `.env` if they are not already set. Use the Foundry resource endpoint and deployment name from your project. The API key stays in the local Node server and is never sent to the browser. Do not paste it into chat or commit `.env`.
+Set `FOUNDRY_API_KEY`, `FOUNDRY_ENDPOINT`, and `FOUNDRY_MODEL` in `.env` to your resource endpoint and deployment. Optionally set `FOUNDRY_REWRITE_MODEL` to a stronger deployment on the same resource for source rewrites; input generation keeps using `FOUNDRY_MODEL`. The API key stays in the local Node server and is never sent to the browser. Do not paste it into chat or commit `.env`.
 
-Before installing, stop any existing Vite server for this demo with Ctrl+C in the terminal where it is running, including another terminal from an earlier session. On Windows, Vite holds `esbuild.exe` open and `npm.cmd ci` can fail with `EPERM` while that process is active. Then install the locked dependencies and start the app:
+Stop an existing Vite server for this demo before reinstalling dependencies. Then run:
 
 ```powershell
 npm.cmd ci
 npm.cmd run dev
 ```
 
-Keep that terminal running and open `http://127.0.0.1:5173`. To confirm the backend loaded configuration, visit `http://127.0.0.1:5173/api/status`; it should return `configured: true` and the model name. Choose a project folder to begin.
-
-If the page is blank, check the terminal where Vite is running and the browser developer console for a React/runtime error, then hard-refresh the page after fixing it. If `npm.cmd ci` still fails with `EPERM` on `esbuild.exe`, check for another running Vite terminal, stop it, retry `npm.cmd ci`, and then run `npm.cmd run dev`.
-
-If the page loads but behaves like an older version (for example, the build check says unavailable for the `npm-review` sample), the dev server is running stale backend code. Stop it with Ctrl+C and run `npm.cmd run dev` again. Saving files under `server/` now restarts the API automatically; in-progress reviews are lost when that happens.
-
-The app first prepares a local inventory and shows the exact source paths and npm package identifiers before any external request. When both source and npm identifiers are present, one combined approval starts Foundry and npm/OSV analysis together in the same review. Review the evidence and proposed source replacements, then download the transformed ZIP. The uploaded folder is not modified.
-
-## Demo Walkthrough
-
-Use the small banking sample for source refactoring. In the folder picker, navigate from the repository root to:
-
-```text
-demos/targeted-legacy-code-transformation/fixtures/node
-```
-
-This fixture contains six files and does not require `npm install`. Select the `node` folder itself, not its parent `fixtures` folder.
-
-1. Select the `node` folder and prepare the review.
-2. On the data-review step, inspect the source paths. Check **Send source to Foundry** to approve the model transfer.
-3. Review the findings. Expand **Inspect exact change** to compare each original span with its proposed replacement.
-4. Select only the findings you approve, then choose **Approve ... and transform**. To leave source unchanged, choose **Reject review** instead.
-5. Review the **What changed** report: each applied change with file, line range, rationale, and before/after code. Then download the transformed ZIP. The fixture remains unchanged; the ZIP contains the staged copy with only approved edits.
-
-To demo code and npm analysis together, use this compact sample:
-
-```text
-demos/legacy-codebase-transformation-web/samples/npm-review
-```
-
-This sample contains one source file, `package.json`, a v3 lockfile, and a root `build` script; it needs no local `npm install` and has no `node_modules` directory. After **Prepare review**, confirm the data-review panel says the build check is available. If it says unavailable, reject that preview, refresh the page, and select the folder again. Inspect the source path, Registry names, and exact OSV name/version tuples, then approve the combined transfer once to run both analyses in the same review.
-
-After evidence loads, select a nondeprecated direct update candidate, such as the `mkdirp` major-version candidate. Choose **Resolve 1 update** (or the matching update count) to resolve the package/lock diff in a temporary copy. Review the exact direct and transitive lock changes and the displayed build command. Then acknowledge the build warning and choose **Run build and stage download**.
-
-The app runs the displayed `npm ci --ignore-scripts` install with the public npm registry and
-empty npm config, then `npm --ignore-scripts run build` to suppress lifecycle hooks. It does not
-run tests. The build script executes uploaded project code, and the temporary directory is not an
-OS sandbox. Only a successful build stages the approved source and dependency changes for ZIP
-download; a failed build leaves the uploaded files unchanged. Generated build output and
-`node_modules` are not included in the ZIP.
-
-Project tests are never run. Dependency edits are made only in the staged copy after the selected update's build succeeds. After a successful transform, the **What changed** report lists source before/after code, package version changes, lockfile changes, and the build output. The ZIP also contains `TRANSFORMATION-REPORT.md` with the same change details.
-
-For a larger multi-file sample with deprecated dependencies and source refactoring candidates, use:
-
-```text
-demos/legacy-codebase-transformation-web/samples/order-desk
-```
-
-This Node.js order desk app has separate order-report and catalog-search modules plus direct dependencies pinned to deprecated versions of `mkdirp` and `uuid`. From the sample folder, run `npm ci` and `npm start` to see its output. Select the `order-desk` folder in the demo, inspect the disclosed source and package identifiers, and approve the combined analysis. The intentionally nested `buildOrderReport` and repetitive `searchCatalog` functions are source-refactoring candidates; the dependency panel shows the deprecation notices and update candidates. Selecting updates exposes the package/lockfile diff and the app's `npm run build` command for explicit approval.
-
-For the most visually obvious source-only transformation, use:
-
-```text
-demos/legacy-codebase-transformation-web/samples/dispatch-desk
-```
-
-This small Node.js CLI has one roughly 25-line `summarizeDispatch` function with deeply nested request, status, destination, and package validation branches. The web scan prompt prioritizes a whole-function simplification for this kind of target. Run the sample with `npm start`, then select the `dispatch-desk` folder in the demo and approve source analysis. Compare the full function in the report to see whether the model produces the shorter guard-clause replacement. This source-only sample has no dependencies to update.
-
-For another multi-file sample with two smaller refactoring targets, use:
-
-```text
-demos/legacy-codebase-transformation-web/samples/studio-schedule
-```
-
-This six-file fitness studio CLI separates booking decisions, class search, attendance summaries, sample data, and report writing. Run `npm.cmd ci` and `npm.cmd start` from the sample folder, then select `studio-schedule` and approve combined source and dependency analysis. Review the small `summarizeBooking`, `findOpenClasses`, and `summarizeAttendance` functions for straightforward refactoring candidates. The report writer exercises intentionally deprecated `mkdirp@0.5.1` and `uuid@3.4.0`; a root build script and lockfile support the approved dependency-update/build flow. See the [sample guide](samples/studio-schedule/README.md) for expected output and update steps.
+Open `http://127.0.0.1:5173`. The API status is available at `http://127.0.0.1:5173/api/status`.
 
 ## Lifecycle
 
-The diagram shows the implemented workflow. Source and dependency selections share one review action; selecting dependency updates carries any selected source changes into the update preview and approved build.
+The demo moves through five stages. Each stage hands a defined output to the next, and nothing leaves your machine or executes until you approve it.
 
 ```mermaid
-flowchart TD
-	Folder["Input: selected project folder"] --> Prepare["1. Prepare local inventory"]
-	Prepare --> Preview["Output: source paths, package identifiers, gaps"]
-	Preview --> Consent{"Approve disclosed transfers?"}
-	Consent -->|No| Stop["Reject review: original folder unchanged"]
-	Consent -->|Yes| Analyze["2. Analyze approved source and npm metadata"]
-	Analyze --> Evidence["Output: validated source proposals and dependency evidence"]
-	Evidence --> Select["3. Review and select changes"]
-	Select --> Route{"Selected dependency updates?"}
-	Route -->|No, source edits selected| Apply["Validate and stage approved source edits"]
-	Apply --> Export["6. Export transformed ZIP and report"]
-	Route -->|Yes, with optional source edits| Resolve["4. Resolve selected versions and lockfile"]
-	Resolve --> Diff["Output: package and lock diff, source count, build command"]
-	Diff --> Approval{"Approve staged update and build execution?"}
-	Approval -->|No| Stop
-	Approval -->|Yes| Build["5. Install and build temporary copy"]
-	Build --> Result{"Install and build exit successfully?"}
-	Result -->|Yes| Export
-	Result -->|No| Failure["Output: failure details; download blocked"]
-	Export --> Download["Output: approved files and TRANSFORMATION-REPORT.md"]
+flowchart LR
+  A[01 Choose project] --> B[02 Assess locally]
+  B -->|select up to 5 units<br/>+ one combined approval| C[03 Review proposals<br/>per-proposal characterisation]
+  C --> R[Apply<br/>combined characterisation re-check]
+  R --> D[04 Build check<br/>only when dependency updates are selected<br/>build + characterisation on upgraded copy]
+  D --> E[05 Export]
 ```
 
-### Stage Success Criteria
+Characterisation runs on every path: once per proposal against its rewrite, and again across all selected proposals in the combined staged copy before anything is applied. When you select a dependency update, it runs a third time against the upgraded copy after the build passes. Stage 04 is the only optional step. It runs when you select a dependency update and needs its own approval.
 
-| Stage | Input | Output | Success criterion |
-|-------|-------|--------|-------------------|
-| 1. Prepare | Selected folder and uploaded bytes | Local inventory, transfer disclosure, coverage gaps, build availability | Accepted files have validated relative paths and stay within upload limits; no analysis-service request occurs before consent. |
-| 2. Analyze | Approved source and package identifiers | Validated source proposals, npm/OSV evidence, explicit failures or gaps | Only approved transfers occur; invalid source proposals are excluded and incomplete coverage remains visible. No findings is not proof that the project needs no changes. |
-| 3. Select and stage source | Explicitly selected finding IDs | Staged exact source replacements or source selections carried into dependency resolution | Only selected, fresh, nonoverlapping exact spans are changed; the original folder remains unchanged. Source-only export does not require a build. |
-| 4. Resolve updates | Selected eligible direct updates and optional selected source edits | Updated package/lockfile preview, source-finding count, install/build commands | npm resolves the selected versions; lockfile origin and integrity checks pass; the diff is presented before build execution or dependency export. |
-| 5. Build | Approved preview and explicit build acknowledgement | Captured build result; exportable staged files only on success | Both locked installation and the declared build exit with code zero within execution/output limits. Failure blocks download; tests are not run by the workflow. |
-| 6. Export | Applied source-only copy or successful dependency-build copy | ZIP containing approved files and transformation report | Archive content reflects the approved staged changes and records build status when applicable; generated build output and installed dependencies are excluded. |
+| Stage | Inputs | What happens | Outputs | Network or execution |
+|-------|--------|--------------|---------|----------------------|
+| 01 Choose project | A local project folder (up to 500 files, 25 MB) | The browser uploads supported files to the local Node server; `node_modules` and `dist` are excluded | An in-memory session holding the file bytes | None |
+| 02 Assess locally | Session files and optional `debt.config.json` | Babel parses each source file, measures every function, applies the rules, and scores the project | A–E rating, per-file scores, hotspots, findings with line and column, selectable units, coverage gaps, and a dependency inventory | None |
+| 03 Review proposals | Up to five selected units, the findings you approved in each, and your combined approval | For each function, Foundry generates five inputs, the original runs twice to capture a baseline, Foundry rewrites the unit for the approved findings only, static gates run, and the rewrite replays the baseline. npm Registry and OSV evidence loads for the declared packages | One proposal per unit (`ready`, `rejected`, or `failed`) with its targeted findings, gates, case tabs, residual findings, attempt history, a preview of the generated test file, and dependency update candidates | Foundry, npm Registry, OSV, `npm ci --ignore-scripts` in a temporary copy, and local function execution |
+| 04 Build check | Applied proposals, selected dependency updates, and your separate build approval | The server resolves the update, shows the `package.json` and lockfile diff, then runs `npm ci` and `npm run build` with scripts disabled in a temporary copy. After a passing build, every stable characterisation baseline replays against the upgraded copy; any difference blocks the update | Build status and output, per-function characterisation results, plus updated manifests when both pass | npm install, the project build script, and local function execution |
+| 05 Export | The staged session | The server packages the staged project | A ZIP with the transformed source, `__characterisation__/*.test.js` files, updated manifests, and `TECH-DEBT-REPORT.md` with the before and after ratings | None |
 
-### Boundaries And Meaning Of Success
+Source-only runs skip stage 04. The uploaded folder is never modified, and the workflow does not run your project's own tests. Sessions live in server memory, so restarting the dev server clears them.
 
-* The browser uploads to the local Node server. The original selected folder is never edited; changes are staged in memory or disposable temporary copies.
-* Foundry receives approved source for refactoring. npm Registry receives package identifiers, and OSV receives package/version identifiers. Dependency evidence is not a model-generated migration or a compatibility guarantee.
-* API credentials stay on the server. Review sessions are temporary, expire after inactivity, and do not survive a server restart.
-* Dependency resolution uses the public npm registry. Build installation uses controlled empty npm configs and a sanitized environment; dependency lifecycle hooks are disabled.
-* The declared build still executes uploaded project code on the server machine. A temporary folder is not an OS sandbox. Install and build limits are three minutes and two minutes respectively, with a 128 KiB command-output limit.
-* Source-only success means selected edits were validated and staged, not that the project builds. Dependency-update success means installation and the declared build passed, not that runtime behavior, security, or all API compatibility was verified.
-* In the studio sample, the declared build runs the CLI and report writer rather than compiling source. Different uploads run their own declared build scripts; the workflow does not add a separate test run.
+## Step-By-Step Demo Guide
 
-### Proposed Only: Dependency Migration
+This walkthrough uses the headline `samples/invoice-desk` project. It shows both a source refactor and a dependency upgrade.
 
-Babel-based JavaScript/TypeScript dependency-reference discovery and model-proposed migration edits are not implemented. The current source analysis is not guided by dependency versions selected later, and the update-diff screen does not yet offer dependency-specific source migrations.
+1. Optionally confirm the sample works on its own: from `samples/invoice-desk`, run `npm.cmd ci` and `npm.cmd start`. The CLI prints two invoice summaries.
+2. Start the assessor with `npm.cmd run dev` from this folder and open `http://127.0.0.1:5173`. The header shows the configured model, or `Foundry not configured`.
+3. Choose Select folder, pick `samples/invoice-desk`, then choose Run local assessment.
+4. Review the dashboard. The project rates D. The hotspots list `calculateDiscount` (nesting, complexity, magic numbers, a TODO), `buildInvoiceLines` (long function, unclear names), `formatLine` (seven parameters and the vague name `val`), and a top-level statement with `var`, `==`, and a magic number. Select a hotspot to open its local detail:
+   * Each finding shows its position as `Line N:Col` for an exact token, or `Line N` for whole-function metrics, which point at the function's first line.
+   * The source preview has line numbers. Lines with approved findings are highlighted red, lines with only unapproved findings are grey, and the badge counts the findings on that line.
+   * Choose a finding's position to scroll the source to that line, or choose a flagged line to highlight its findings in the list.
+5. Select those four units. Ticking a unit approves all of its findings. Use each finding's checkbox to drop any you do not want changed, or Select all and Clear all for the whole unit; clearing every finding deselects the unit. Only approved findings go to Foundry and the gates; unapproved findings stay as they are. The approval band shows the approved finding count, the exact source spans sent to Foundry, the package names and versions sent to npm and OSV, and that selected functions will execute locally.
+6. Tick Also check npm dependencies if you want the dependency upgrade in this run. Leave it unticked for a source-only run: no npm Registry or OSV lookups happen and the dependency update and build check are skipped. Then approve once. While assessment or transformation runs, a spinner shows that work is in progress. Transformation also shows the current unit and step, such as baseline capture or rewrite, with a completed-unit count.
+7. Review each proposal:
+   * Approved findings targeted lists the findings you approved for that unit, with their line and column.
+   * The BEFORE and PROPOSED columns show the replacement span.
+   * The gate list shows each static and behaviour gate as PASS, FAIL, or NOT CHECKED.
+   * The characterisation tabs show each case with its input, the original's result, and the rewrite's result. A failing case lists the exact fields that differ, for example `value[0].tax expected -7.42, got 0`, and the same differences go to the model for its one retry. The final Test file tab shows the exact `node:test` file that ships in the export.
+   * Remaining findings list what the rewrite left behind. `too-many-params` on `formatLine` is expected because the signature is preserved.
+   * Rejected proposals show both attempts and which gates each failed. They cannot be selected.
+8. Tick the ready proposals. If a selected proposal is marked not-checked and has not been acknowledged, Apply opens a dialog listing the affected proposal and why characterisation did not run. Choose Go back to change the selection, or Acknowledge and continue to apply it without a behaviour check. The top-level statement has no function inputs, so it always needs acknowledgement.
+9. Select the `lodash@4.17.20` patch update once its npm and OSV evidence appears (`uuid@3.4.0` is shown as deprecated but is only used for CLI invoice IDs), then choose Review update diff and build. The server re-runs every stable baseline against the combined staged copy before anything is applied.
+10. In Build check, inspect the package and lockfile diff and the exact commands, then approve the build separately. After the build passes, the server replays each stable baseline against the copy with the upgraded lodash installed. If `buildInvoiceLines` returns anything different, the update is blocked and the build result names the function and the matched case count.
+11. After the build and the post-update characterisation pass, download the ZIP. The generated tests are under `<project>/__characterisation__/`; from the extracted project folder, run them with `node --test __characterisation__`. They replay the stable cases against the transformed functions. The workflow does not run these tests automatically. Open `TECH-DEBT-REPORT.md` to see the rating move from D towards B, each applied change, the exported test-file paths, the post-update characterisation result, and the residual findings.
 
-The discussed extension would discover affected staged files and show migration proposals within the existing update-preview stage, without adding a user-facing stage. Its scope, limits, migration-guidance sources, transfer consent, approval behavior, and acceptance criteria are still undecided. C# is outside that proposed migration capability for now; this does not remove existing source-analysis support. This discussion is not authorization to implement the extension.
+For a shorter source-only run, use `samples/dispatch-desk`. Select `summarizeDispatch`, approve, review its cases and gates, apply, and download. There are no dependencies, so stage 04 is skipped.
 
-<details>
-<summary>How each step works: inputs, outputs, and tools</summary>
+## How The Parts Work
 
-### 1. Select and prepare a folder
+Each server module owns one responsibility. The UI calls them through a small HTTP API.
 
-- **Input:** One folder selected with the browser's folder picker. The demo accepts up to 500 files and 25 MB total.
-- **Tools:** The React page uses the browser File API and sends a multipart upload to the local Express API. Busboy parses the upload.
-- **Work:** The browser filters excluded/generated paths. The server checks the manifest against uploaded bytes, normalizes relative paths, and rejects duplicate, conflicting, oversized, or multi-root uploads. It builds a UTF-8 source inventory and an npm manifest/lock inventory in memory. No network calls are made yet.
-- **Output:** A short-lived review session plus a preview of source paths/chunks, npm package names and exact locked versions, inventory gaps, and whether the supported dependency build path is available.
+| Module | Responsibility |
+|--------|----------------|
+| `server/assess/` | Parses source with Babel (`parse.js`), measures lines, nesting, complexity, callbacks, and branch chains per function (`metrics.js`), applies rules and thresholds (`rules.js`), builds selectable function, statement, and file units (`units.js`), and converts findings into remediation minutes and A–E ratings (`score.js`). Entirely local and deterministic. |
+| `server/foundry-client.js` | Sends one prompt per request to the Foundry chat completions endpoint with a strict JSON schema, bounded response size, timeout, and credential leak check. Rewrites use `FOUNDRY_REWRITE_MODEL` when set. |
+| `server/transform/prompts.js` | Builds the input-generation prompt and the rewrite prompt. The rewrite prompt sends only the selected unit, lists each required change (exact identifiers to rename, where constants go, TODO comments to delete without acting on them), states hard metric limits, and forbids new behaviour. |
+| `server/characterise/` | `harness.js` writes the project to a temporary folder, installs locked dependencies when needed, and runs each case in a separate `node --permission` process that can only read that folder. `runner.cjs` captures the return value, thrown error, argument mutation, and console output. `export.js` renders the replayable `node:test` file. |
+| `server/transform/gates.js` | Applies the rewrite to a copy of the file and checks span, hash, syntax, invariants, scope, metric improvement, and new findings. |
+| `server/transform/agent.js` | Runs one unit end to end: generate inputs, capture the baseline, request a rewrite, run the static gates, replay the baseline against the rewritten copy, and retry once with the failed gates, unresolved findings, and mismatched cases as feedback. |
+| `server/dependency-review.js` | Inventories declared and locked npm packages and gathers npm Registry and OSV evidence for update candidates. |
+| `server/dependency-build.js` | Resolves an approved update with `npm install --package-lock-only`, then runs `npm ci` and `npm run build` with lifecycle scripts disabled in a temporary copy. |
+| `server/workflow.js` | Owns sessions, the five-unit limit, approval checks, proposal state, the combined re-check before apply, the post-update characterisation replay, characterisation test staging, and the change report. |
+| `server/api.js` | Exposes `/api/status`, `/api/analyze/prepare`, `/api/sessions/:id/transform`, `/progress`, `/apply`, `/updates/prepare`, `/updates/build`, and `/download`. |
+| `src/App.jsx` | Renders the stages, approval band, proposals, gate list, case tabs, build checkpoint, and export. |
 
-The dependency lists are generated from the selected folder's manifests and lockfiles, not hard-coded for a sample. Registry names are direct dependencies; OSV tuples also include supported transitive dependencies recorded in the lockfile. This is a fixed snapshot of the upload for consent, not live Registry/OSV results. Select a new folder to prepare a different snapshot.
+### How They Work Together
 
-### 2. Review data transfers and analyze
+```mermaid
+sequenceDiagram
+  participant UI as Browser UI
+  participant WF as workflow.js
+  participant AS as assess
+  participant AG as agent.js
+  participant FD as Foundry
+  participant CH as characterise
+  participant GT as gates.js
+  UI->>WF: upload folder
+  WF->>AS: assessProject
+  AS-->>UI: rating, hotspots, units
+  UI->>WF: selected units + approval
+  loop each selected unit
+    WF->>AG: transformUnit
+    AG->>FD: generate 5 inputs
+    AG->>CH: run original twice, keep stable cases
+    AG->>FD: rewrite with required changes
+    AG->>GT: static gates on rewritten copy
+    AG->>CH: replay cases against rewritten copy
+    AG-->>AG: one retry with feedback if needed
+  end
+  WF-->>UI: proposals, gates, case tabs, test preview
+  UI->>WF: apply selected proposals
+  WF->>CH: replay every baseline on combined copy
+  WF-->>UI: staged files, report, optional build checkpoint
+  opt dependency update selected
+    UI->>WF: approve build
+    WF->>WF: npm ci + npm run build on upgraded copy
+    WF->>CH: replay every baseline on upgraded copy
+    WF-->>UI: build and characterisation results
+  end
+```
 
-- **Input:** The source-sharing and dependency-metadata approvals shown in the data-review step. When supported source and npm lookup identifiers are both present, both approvals must be given together.
-- **Tools:** The server calls the configured Microsoft Foundry chat-completions deployment for source analysis, `registry.npmjs.org` for direct package metadata, and OSV for exact package/version advisory evidence.
-- **Work:** Source files are chunked and prompted using the existing `workspace-scan.js` helpers; `scan-pipeline.js` validates the response contract. The server checks proposed paths, ranges, and exact source text before presenting findings. npm requests send only the disclosed package names or name/version tuples. The Foundry key remains server-side; manifests, source, and credentials are not sent to npm or OSV.
-- **Output:** Proposed source findings with exact before/replacement text, rationale, and confidence, plus Registry and OSV evidence and any coverage gaps. Provider evidence is advisory, not a compatibility or exploitability decision.
+The assessor is the single source of truth for findings. The gates re-run it on the rewritten file, so a proposal must reduce the targeted smells without creating new ones. Characterisation is the behaviour check: the original's recorded outputs are the expected values, and the rewrite must reproduce them exactly. The combined re-check before apply catches interactions between proposals in the same file. The post-update replay catches behaviour changes caused by a new dependency version. The generated test file lets you replay the same cases later with `node --test`.
 
-If some model proposals fail validation, those proposals are excluded and the scan is marked incomplete. When only line/character coordinates are out of bounds, the adapter can recover a proposal if its exact original text occurs once in that source chunk, then reruns normal validation. Missing or ambiguous source text remains rejected. Individually validated findings remain selectable; approving them does not mean every source file was successfully analyzed.
+## Assessment Rules
 
-### 3. Review and approve source changes
+The assessor parses `.js`, `.cjs`, `.mjs`, and `.jsx` source with Babel. Assessment is local and deterministic. Parse failures appear as coverage gaps and are not silently treated as clean files.
 
-- **Input:** Finding IDs individually selected by the user.
-- **Tools:** The React review UI posts the selection to the Express API. The server applies edits to an in-memory copy.
-- **Work:** Before applying, the server verifies the source hash and exact text span again, rejects unknown or overlapping selections, and applies approved replacements only. It does not modify the selected folder. This source-only route does not run a project build.
-- **Output:** An approved staged copy and a change report containing file, line range, rationale, and before/after text. The user can proceed to export or choose dependency updates when eligible.
+| Rule | Default warning | Default high |
+|------|-----------------|--------------|
+| `long-function` | 40 nonblank lines | 80 nonblank lines |
+| `deep-nesting` | depth 3 | depth 5 |
+| `high-complexity` | 10 | 20 |
+| `too-many-params` | 4 | 6 |
+| `callback-nesting` | depth 3 | depth 4 |
+| `long-branch-chain` | 6 branches | 10 branches |
+| `bad-variable-name` | short, vague, or numbered-copy name | not applicable |
+| `magic-number` | numeric literal outside the allowlist | not applicable |
+| `loose-equality` | `==` or `!=` | not applicable |
+| `var-declaration` | each `var` declaration | not applicable |
+| `debt-marker` | `TODO`, `FIXME`, or `HACK` | not applicable |
+| `long-file` | 300 nonblank lines | 600 nonblank lines |
+| `empty-catch` | empty `catch` block | not applicable |
 
-### 4. Resolve optional dependency updates
+Function metrics exclude nested function bodies, except that callback nesting measures nested callbacks. Top-level `var`, loose equality, and magic-number findings can be transformed as one statement unit. A TODO outside a selected function is report-only. A magic-number replacement declares its named constant at the beginning of the selected function body.
 
-- **Input:** Selected eligible direct update candidates, plus any source findings selected for the same staged copy.
-- **Tools:** The Node server uses npm with scripts disabled and the public npm registry to resolve a temporary package/lockfile copy. It supports a single root `package.json`, an npm lockfile v2/v3, and a declared root build script; unsupported layouts are not offered this update/build path.
-- **Work:** The server updates selected manifest declarations in the temporary copy, resolves the lockfile, validates the result, and compares old and new direct and transitive lock entries. This preview does not modify the uploaded folder or run project lifecycle scripts.
-- **Output:** An exact package and lockfile diff and the install/build commands for review. No dependency changes are staged for download yet.
+Each finding contributes estimated remediation minutes. Ratings compare that estimate with an allowance of 0.5 minutes per source line: A is at most 5%, B at most 10%, C at most 20%, D at most 50%, and E is above 50%. Estimates are starting values for this demo and can be calibrated with `debt.config.json` at the project root.
 
-### 5. Approve and run the build
+Example configuration:
 
-- **Input:** Explicit acknowledgement of the displayed build command and the exact staged update preview.
-- **Tools:** The server runs `npm ci --ignore-scripts` and then `npm --ignore-scripts run build` in a temporary copy, with bounded execution time/output and a sanitized environment.
-- **Work:** The build command is uploaded project code, and the temporary directory is not an OS sandbox. Lifecycle scripts are disabled; project tests are not run. A failed install or build does not enable download.
-- **Output:** On success, the staged source, manifest, and lockfile become exportable and the report records build status/output. On failure, the result is shown in the UI and no transformed ZIP is made available.
+```json
+{
+  "rules": {
+    "long-function": { "warn": 50, "high": 90 }
+  },
+  "nameAllowlist": ["cfg"],
+  "vagueNames": ["payload"],
+  "magicAllowlist": [0, 1, -1, 2, 100]
+}
+```
 
-### 6. Export the transformed copy
+## Transformation Gates
 
-- **Input:** An applied source-only session, or a session whose approved dependency update passed the build.
-- **Tools:** The Express download route uses `archiver` to create a ZIP from the staged in-memory files.
-- **Work:** The archive includes `TRANSFORMATION-REPORT.md` with the approved source before/after changes, package and lock changes, build details when applicable, and a tests-not-run note. The original uploaded folder remains unchanged.
-- **Output:** A downloadable transformed ZIP. Review state is held in server memory, expires after inactivity, and is lost if the server restarts.
-</details>
+The app asks Foundry for exactly five JSON argument cases only after you select a function and approve the combined action. It runs the original function twice in a temporary copy, drops unstable cases, and requires at least three stable cases for a checked baseline. If the baseline is unavailable or unstable, the proposal is marked `not-checked` and needs acknowledgement.
 
-## Scope And Limits
+The runner supports top-level CommonJS functions in modules without executable top-level expressions. It captures return values, thrown errors, argument mutation, and console output. Class methods, nested functions, and ESM targets are not characterised in v1. Characterisation test files are included in the ZIP for functions with stable baselines.
 
-The demo accepts up to 500 files and 25 MB per review. It analyzes at most 30 source chunks, with at
-most one additional Foundry retry per chunk when source or replacement text is invalid. Retry feedback
-names the specific text-field failure without echoing source code. This allows at most 60 sequential
-Foundry requests. It makes at most 100 npm Registry lookups, 200 OSV version queries, and 300 metadata
-requests. Supported UTF-8 source
-extensions are `.cs`, `.js`, `.cjs`, `.mjs`, `.jsx`, `.ts`, and `.tsx`. Files under `.git`, `node_modules`,
-`vendor`, `bin`, `obj`, `dist`, `build`, `coverage`, `generated`, `out`, and `target` are excluded.
+Node 24's permission model restricts filesystem access and child processes for the runner, but it does not block network access. The consent panel says when uploaded functions will execute. Build commands also execute uploaded code in a temporary directory that is not an OS sandbox. npm installation uses `--ignore-scripts`; lifecycle scripts remain disabled and project tests are not run.
 
-The npm review supports a single root `package.json` and npm lockfile v2/v3 for updates. With consent,
-direct package names are looked up at `registry.npmjs.org` for published version and deprecation
-metadata. Exact locked package/version tuples are queried at OSV. Package identifiers can reveal
-private project metadata; the app displays the bounded lookup lists before asking. When source and npm
-identifiers both exist, partial analysis approval is rejected; approve both analyses together or reject
-the upload. Update resolution is separately approved after candidate selection and diff review.
+Static gates require an exact unchanged source span, valid updated syntax, preserved function name/parameter count/module exports/module format, no colliding helper names, metric improvement, and no new warning-or-higher findings. Statement rewrites also pass a scope check for unsafe `var` conversions. Named-constant declarations with literal values at the start of a function do not count toward its length, so extracting magic numbers cannot create a new `long-function` finding.
 
-This version does not run project tests, execute lifecycle scripts, persist reviews after a server restart, or provide authentication or hosting. The declared build command is executed only after explicit approval, in a temporary copy that is not an OS sandbox. Review sessions expire after 30 minutes of inactivity.
+Each proposal replays its stable cases against the rewritten copy, and the gate message reports how many cases differ and why any case failed to run. A failed attempt receives one retry with the failed gates, unresolved findings, and up to three mismatched cases as feedback. Before apply, every stable baseline runs again against the final combined staged copy.
 
-Model output is unverified. The server validates each proposed exact source span and requires explicit selection before applying it to the staged copy. No change is written to the original folder.
+`too-many-params` remains visible when the original function signature is preserved. This signature-protected finding does not block a proposal when another actionable smell improves and all other gates pass.
+
+## Validation
+
+From this folder:
+
+```powershell
+npm.cmd test
+npm.cmd run check
+npm.cmd run build
+```
+
+The project tests exercise assessment rules, characterization behavior, static gates, workflow and API contracts, and dependency review/build behavior. The browser app uses `npm run dev` and requires user approval before source transfer, npm/OSV lookup, or local function execution.

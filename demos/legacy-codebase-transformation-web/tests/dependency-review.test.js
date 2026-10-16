@@ -115,3 +115,25 @@ test('bundled npm review sample has a compact, analyzable v3 manifest and lock',
   assert.match(inventory.buildScript, /node -e/);
   assert.match(inventory.buildScript, /require\('mkdirp'\)/);
 });
+
+test('invoice-desk exposes the headline npm dependencies with a public v3 lock', () => {
+  const root = path.resolve(__dirname, '../samples/invoice-desk');
+  const files = new Map(['package.json', 'package-lock.json', 'src/index.js', 'src/invoice-lines.js'].map((relativePath) =>
+    [`invoice-desk/${relativePath}`, fs.readFileSync(path.join(root, relativePath))]));
+  const inventory = inventoryNpmFiles(files, 'invoice-desk');
+  const lock = JSON.parse(files.get('invoice-desk/package-lock.json').toString('utf8'));
+  assert.deepEqual(inventory.lookup.registryNames, ['lodash', 'uuid']);
+  assert.deepEqual(inventory.lookup.advisoryTuples.filter((item) => item.name === 'lodash' || item.name === 'uuid'), [
+    { name: 'lodash', version: '4.17.20' },
+    { name: 'uuid', version: '3.4.0' }
+  ]);
+  assert.equal(inventory.buildAvailable, true);
+  assert.match(inventory.buildScript, /scripts\/build\.js/);
+  assert.equal(inventory.gaps.length, 0);
+  assert.equal(lock.lockfileVersion, 3);
+  for (const name of ['lodash', 'uuid']) {
+    const entry = lock.packages[`node_modules/${name}`];
+    assert.ok(entry.resolved.startsWith(`https://registry.npmjs.org/${name}/`));
+    assert.match(entry.integrity, /^sha512-/);
+  }
+});

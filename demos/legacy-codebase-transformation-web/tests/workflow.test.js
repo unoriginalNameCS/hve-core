@@ -1,30 +1,48 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const { analyzePreparedUpload, applyApprovedFindings, getSession, normalizeUploadPath, prepareUpload, prepareUploadedFiles, removeSession } = require('../server/workflow');
+const {
+  applyApprovedFindings,
+  getSession,
+  getTransformProgress,
+  normalizeUploadPath,
+  prepareUpload,
+  prepareUploadedFiles,
+  removeSession,
+  replayAfterUpdate,
+  safeTransformFailure,
+  transformUnits
+} = require('../server/workflow');
 
-const source = [
-  'function isReady(value) {',
-  '  if (value) {',
-  '    return true;',
-  '  } else {',
-  '    return false;',
-  '  }',
-  '}',
-  ''
-].join('\n');
-const candidate = {
-  category: 'redundant-control-flow', rationale: 'The branch returns booleans directly.', confidence: 'high',
-  symbol: 'isReady', functionStartLine: 1, functionEndLine: 7, startLine: 2, startCharacter: 2,
-  endLine: 6, endCharacter: 3,
-  originalText: 'if (value) {\n    return true;\n  } else {\n    return false;\n  }',
-  replacementText: 'return Boolean(value);'
-};
+function prepareProject(path, content) {
+  const bytes = Buffer.from(content);
+  const preview = prepareUpload([{ id: 'file-0', path, size: bytes.length }], new Map([['file-0', bytes]]));
+  return { preview, bytes };
+}
 
-test('upload paths reject traversal and conflicting roots', () => {
+function config() {
+  return { apiKey: 'test', model: 'test-model', url: 'https://example.test' };
+}
+
+function readyProposal(unit, replacementText, options = {}) {
+  return {
+    unitId: unit.id,
+    path: unit.path,
+    name: unit.name,
+    status: 'ready',
+    originalText: unit.originalText,
+    replacementText,
+    rationale: 'Focused test proposal.',
+    gates: [{ id: 'static', status: 'pass' }, { id: 'characterisation', status: options.baseline?.status === 'passed' ? 'pass' : 'not-checked' }],
+    baseline: options.baseline ?? { status: 'not-checked', reason: 'Not available for this test.' },
+    comparison: { status: options.baseline?.status === 'passed' ? 'passed' : 'not-checked' },
+    residualFindings: [],
+    warningAcknowledgementRequired: options.baseline?.status !== 'passed'
+  };
+}
+
+test('upload paths reject traversal and conflicting manifests', () => {
   assert.equal(normalizeUploadPath('project/src/file.js'), 'project/src/file.js');
   assert.throws(() => normalizeUploadPath('../outside.js'), /invalid relative path/);
   assert.throws(() => normalizeUploadPath('C:/outside.js'), /invalid relative path/);
@@ -34,125 +52,164 @@ test('upload paths reject traversal and conflicting roots', () => {
   ], new Map([['file-0', Buffer.from('a')], ['file-1', Buffer.from('b')]])), /did not match their manifest/);
 });
 
-test('combined demo sample prepares exactly one source chunk with npm inventory', () => {
-  const sampleRoot = path.resolve(__dirname, '../samples/npm-review');
-  const relativePaths = ['package.json', 'package-lock.json', 'src/transfer.js'];
-  const uploaded = relativePaths.map((relativePath, index) => ({
-    id: `file-${index}`,
-    path: `npm-review/${relativePath}`,
-    bytes: fs.readFileSync(path.join(sampleRoot, relativePath))
-  }));
-  const preview = prepareUpload(
-    uploaded.map(({ id, path: relativePath, bytes }) => ({ id, path: relativePath, size: bytes.length })),
-    new Map(uploaded.map(({ id, bytes }) => [id, bytes]))
-  );
-
-  assert.equal(preview.summary.sourceFiles, 1);
-  assert.equal(preview.summary.projectedRequests, 1);
-  assert.deepEqual(preview.sourceDisclosure.files, ['npm-review/src/transfer.js']);
-  assert.deepEqual(preview.dependencyPreview.registryNames, ['lodash', 'mkdirp']);
-  assert.equal(preview.dependencyPreview.advisoryTuples.length, 3);
-  assert.equal(preview.dependencyPreview.buildAvailable, true);
-  assert.ok(preview.dependencyPreview.buildScript);
-  removeSession(preview.sessionId);
+test('local-assessment runs during upload preparation without network or project execution', () => {
+  const childProcess = require('node:child_process');
+  const originalFetch = globalThis.fetch;
+  const originalSpawn = childProcess.spawn;
+  globalThis.fetch = () => { throw new Error('upload assessment attempted network access'); };
+  childProcess.spawn = () => { throw new Error('upload assessment attempted project execution'); };
+  let preview;
+  try {
+    ({ preview } = prepareProject('project/src/inspect.js', 'function inspect(temp) { return temp; }'));
+    assert.ok(preview.assessment.findings.some((item) => item.ruleId === 'bad-variable-name'));
+    assert.equal(preview.summary.findingCount, preview.assessment.findings.length);
+    assert.equal(preview.sourceDisclosure, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    childProcess.spawn = originalSpawn;
+    if (preview) removeSession(preview.sessionId);
+  }
 });
 
-test('validated findings remain selectable when another source response is rejected', async () => {
-  const bytes = Buffer.from(source);
-  const preview = prepareUpload([
-    { id: 'file-0', path: 'project/src/first.js', size: bytes.length },
-    { id: 'file-1', path: 'project/src/second.js', size: bytes.length }
-  ], new Map([['file-0', bytes], ['file-1', bytes]]));
-  let requests = 0;
-  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
-    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
-    requestFindings: async () => (++requests === 1 ? { findings: [candidate] } : { findings: [{ ...candidate, originalText: 'not in the source' }] })
-  });
-  assert.equal(review.sourceStatus, 'incomplete');
-  assert.equal(review.complete, false);
-  assert.equal(review.findings.length, 1);
-  assert.equal(review.sourceFailures.length, 1);
-  assert.throws(() => applyApprovedFindings(preview.sessionId, ['rejected']), /unknown finding/);
-  const applied = applyApprovedFindings(preview.sessionId, [review.findings[0].id]);
-  assert.equal(applied.findings, 1);
-  const session = getSession(preview.sessionId);
-  assert.match(session.files.get('project/src/first.js').toString(), /return Boolean\(value\);/);
-  assert.equal(session.files.get('project/src/second.js').toString(), source);
-  removeSession(preview.sessionId);
-});
-
-test('source analysis retries once when the model returns invalid replacement text', async () => {
-  const preview = prepareUpload(
-    [{ id: 'file-0', path: 'project/src/readiness.js', size: Buffer.byteLength(source) }],
-    new Map([['file-0', Buffer.from(source)]])
-  );
-  const prompts = [];
-  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
-    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
-    requestFindings: async (prompt) => {
-      prompts.push(prompt);
-      return { findings: [prompts.length === 1 ? { ...candidate, replacementText: candidate.originalText } : candidate] };
+test('transform-unit runs the approved selected-unit flow and exposes per-unit progress', async () => {
+  const { preview } = prepareProject('project/src/inspect.js', 'function inspect(temp) { return temp; }');
+  const unit = preview.assessment.units.find((item) => item.kind === 'function');
+  let receivedFiles;
+  const review = await transformUnits(preview.sessionId, { unitIds: [unit.id], approved: true }, {
+    config: config(),
+    transformUnit: async (input, options) => {
+      receivedFiles = input.files;
+      options.onProgress({ stage: 'rewrite' });
+      return readyProposal(input.unit, 'function inspect(value) { return value; }');
     }
   });
-
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[0], /Preserve the existing module format/);
-  assert.match(prompts[0], /Findings must not overlap/);
-  assert.match(prompts[1], /Validation feedback/);
-  assert.match(prompts[1], /replacementText is unchanged from originalText/);
-  assert.equal(review.complete, true);
-  assert.equal(review.summary.requests, 2);
-  assert.equal(review.sourceFailures.length, 0);
-  assert.equal(review.findings.length, 1);
+  assert.equal(review.proposals.length, 1);
+  assert.equal(review.proposals[0].status, 'ready');
+  assert.ok(receivedFiles instanceof Map);
+  assert.ok(receivedFiles.has('project/src/inspect.js'));
+  assert.equal(getTransformProgress(preview.sessionId).stage, 'complete');
   removeSession(preview.sessionId);
 });
 
-test('approval edits only the staged copy and refuses unapproved or repeated writes', async () => {
-  const originalBuffer = Buffer.from(source);
-  const preview = prepareUpload(
-    [{ id: 'file-0', path: 'project/src/readiness.js', size: originalBuffer.length }],
-    new Map([['file-0', originalBuffer]])
-  );
-  const result = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
-      config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
-      requestFindings: async () => ({ findings: [candidate] })
-    });
-  const session = getSession(result.sessionId);
-
-  assert.equal(result.complete, true);
-  assert.equal(session.files.get('project/src/readiness.js').toString('utf8'), source);
-  assert.throws(() => applyApprovedFindings(result.sessionId, ['unknown']), /unknown finding/);
-
-  const applied = applyApprovedFindings(result.sessionId, [result.findings[0].id]);
-  assert.equal(applied.findings, 1);
-  assert.equal(applied.files, 1);
-  assert.equal(applied.report.sourceChanges[0].before, result.findings[0].originalText);
-  assert.equal(applied.report.sourceChanges[0].after, result.findings[0].replacementText);
-  assert.match(session.files.get('project/src/readiness.js').toString('utf8'), /return Boolean\(value\);/);
-  assert.equal(originalBuffer.toString('utf8'), source);
-  assert.throws(() => applyApprovedFindings(result.sessionId, [result.findings[0].id]), /already been transformed/);
-  removeSession(result.sessionId);
-});
-
-test('individually valid proposals cannot stage an invalid combined JavaScript file', async () => {
-  const content = 'function summarize() {\n  var first = 1;\n  var second = 2;\n  return first + second;\n}\n';
-  const bytes = Buffer.from(content);
-  const preview = prepareUpload([{ id: 'file-0', path: 'project/src/summary.js', size: bytes.length }],
-    new Map([['file-0', bytes]]));
-  const proposals = [2, 3].map((line, index) => ({
-    ...candidate, symbol: 'summarize', functionStartLine: 1, functionEndLine: 5,
-    startLine: line, endLine: line, startCharacter: 2,
-    endCharacter: content.split('\n')[line - 1].length,
-    originalText: index === 0 ? 'var first = 1;' : 'var second = 2;',
-    replacementText: `const shared = ${index + 1};`
-  }));
-  const review = await analyzePreparedUpload(preview.sessionId, { sourceApproved: true, dependencyApproved: false }, {
-    config: { apiKey: 'test', model: 'gpt-4.1-mini', url: 'https://example.test' },
-    requestFindings: async () => ({ findings: proposals })
+test('dependency updates replay stable baselines against the upgraded copy', async () => {
+  const session = { rootName: 'project' };
+  const files = new Map([['project/package-lock.json', Buffer.from('{}')]]);
+  const checked = { name: 'calc', unit: { id: 'u1' }, baseline: { status: 'passed', cases: [{}] } };
+  const unchecked = { name: 'stmt', unit: { id: 'u2' }, baseline: { status: 'not-checked' } };
+  const received = [];
+  const passed = await replayAfterUpdate(session, [checked, unchecked], files, {
+    compareRewrite: async (actualFiles, root, unit) => {
+      received.push({ actualFiles, root, unit: unit.id });
+      return { status: 'passed', cases: [{ passed: true }, { passed: true }] };
+    }
   });
-  assert.equal(review.findings.length, 2);
-  assert.throws(() => applyApprovedFindings(preview.sessionId, review.findings.map((finding) => finding.id)),
-    /summary\.js: Replacement must preserve valid JavaScript/);
-  assert.equal(getSession(preview.sessionId).files.get('project/src/summary.js').toString(), content);
+  assert.deepEqual(received, [{ actualFiles: files, root: 'project', unit: 'u1' }]);
+  assert.deepEqual(passed, { status: 'passed', results: [{ name: 'calc', status: 'passed', reason: null, matched: 2, total: 2 }] });
+
+  const failed = await replayAfterUpdate(session, [checked], files, {
+    compareRewrite: async () => ({ status: 'failed', cases: [{ passed: true }, { passed: false }] })
+  });
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.results[0].matched, 1);
+  assert.equal((await replayAfterUpdate(session, [unchecked], files)).status, 'not-run');
+});
+
+test('only approved findings are sent for each selected unit', async () => {
+  const { preview } = prepareProject('project/src/inspect.js', 'function inspect(d, tmp) { return d + tmp; }');
+  const unit = preview.assessment.units.find((item) => item.kind === 'function');
+  const keep = unit.findings.find((item) => item.message.includes('"d"'));
+  await assert.rejects(transformUnits(preview.sessionId, { unitIds: [unit.id], findingIds: [], approved: true }, { config: config() }),
+    /Approve at least one finding for inspect/);
   removeSession(preview.sessionId);
+
+  const second = prepareProject('project/src/inspect.js', 'function inspect(d, tmp) { return d + tmp; }').preview;
+  let receivedFindings;
+  const secondReview = await transformUnits(second.sessionId, { unitIds: [unit.id], findingIds: [keep.id], approved: true }, {
+    config: config(),
+    transformUnit: async (input) => {
+      receivedFindings = input.unit.findings;
+      return readyProposal(input.unit, 'function inspect(amount, tmp) { return amount + tmp; }');
+    }
+  });
+  assert.deepEqual(receivedFindings.map((item) => item.id), [keep.id]);
+  assert.deepEqual(secondReview.proposals[0].targetFindings.map((item) => [item.id, item.line, item.column]), [[keep.id, keep.line, keep.column]]);
+  removeSession(second.sessionId);
+});
+
+test('dependency checks are skipped unless the user opts in', async () => {
+  const { preview } = prepareProject('project/src/inspect.js', 'function inspect(temp) { return temp; }');
+  const unit = preview.assessment.units.find((item) => item.kind === 'function');
+  const review = await transformUnits(preview.sessionId, { unitIds: [unit.id], approved: true }, {
+    config: config(),
+    metadataFetchImpl: async () => { throw new Error('npm/OSV must not be called'); },
+    transformUnit: async (input) => readyProposal(input.unit, 'function inspect(value) { return value; }')
+  });
+  assert.equal(review.dependencyAssessment.status, 'skipped');
+  assert.equal(review.dependencyAssessment.requests, 0);
+  removeSession(preview.sessionId);
+});
+
+test('failed proposals show safe Foundry diagnostics without exposing arbitrary runtime paths', async () => {
+  assert.equal(safeTransformFailure(new Error('Foundry returned HTTP 400. Check the deployment and endpoint configuration.')),
+    'Foundry returned HTTP 400. Check the deployment and endpoint configuration.');
+  assert.equal(safeTransformFailure(new Error('Error: read failed at C:\\private\\source.js')),
+    'Foundry or characterisation processing failed.');
+});
+
+test('apply rechecks the combined copy and stages a runnable characterization test', async () => {
+  const content = 'function inspect(temp) { return temp; }\nmodule.exports = { inspect };';
+  const { preview } = prepareProject('project/src/inspect.js', content);
+  const unit = preview.assessment.units.find((item) => item.kind === 'function');
+  const cases = [{ description: 'normal', args: ['x'], expected: { value: 'x' } }];
+  const review = await transformUnits(preview.sessionId, { unitIds: [unit.id], approved: true }, {
+    config: config(),
+    transformUnit: async () => readyProposal(unit, 'function inspect(value) { return value; }', {
+      baseline: { status: 'passed', cases }
+    })
+  });
+  const proposalId = review.proposals[0].id;
+  assert.match(review.proposals[0].testPreview.path, /^project\/__characterisation__\/.+\.test\.js$/);
+  assert.ok(review.proposals[0].testPreview.content.includes('"description": "normal"'));
+  const applied = await applyApprovedFindings(preview.sessionId, [proposalId], [], {
+    compareRewrite: async () => ({ status: 'passed', cases: [] })
+  });
+  const session = getSession(preview.sessionId);
+  assert.equal(applied.proposals, 1);
+  assert.equal(session.files.get('project/src/inspect.js').toString(),
+    'function inspect(value) { return value; }\nmodule.exports = { inspect };');
+  assert.ok([...session.files.keys()].some((file) => file.startsWith('project/__characterisation__/') && file.endsWith('.test.js')));
+  assert.equal(session.changeReport.testFiles.length, 1);
+  assert.match(session.changeReport.testFiles[0], /^project\/__characterisation__\/.+\.test\.js$/);
+  assert.equal(applied.testFiles, 1);
+  assert.equal(session.changeReport.before.rating, preview.assessment.rating);
+  assert.equal(session.changeReport.after.rating, session.assessment.rating);
+  removeSession(preview.sessionId);
+});
+
+test('apply blocks combined behavior drift and requires not-checked acknowledgement', async () => {
+  const content = 'function inspect(temp) { return temp; }\nmodule.exports = { inspect };';
+  const { preview } = prepareProject('project/src/inspect.js', content);
+  const unit = preview.assessment.units.find((item) => item.kind === 'function');
+  const review = await transformUnits(preview.sessionId, { unitIds: [unit.id], approved: true }, {
+    config: config(),
+    transformUnit: async () => readyProposal(unit, 'function inspect(value) { return value; }', {
+      baseline: { status: 'passed', cases: [{ description: 'normal', args: ['x'], expected: {} }] }
+    })
+  });
+  await assert.rejects(applyApprovedFindings(preview.sessionId, [review.proposals[0].id], [], {
+    compareRewrite: async () => ({ status: 'failed', cases: [] })
+  }), /Combined selected changes did not preserve/);
+  assert.equal(getSession(preview.sessionId).applied, false);
+  removeSession(preview.sessionId);
+
+  const { preview: statementPreview } = prepareProject('statement/src/value.js', 'var amount = 4;');
+  const statement = statementPreview.assessment.units.find((item) => item.kind === 'statement');
+  const statementReview = await transformUnits(statementPreview.sessionId, { unitIds: [statement.id], approved: true }, {
+    config: config(),
+    transformUnit: async () => readyProposal(statement, 'const amount = 4;')
+  });
+  await assert.rejects(applyApprovedFindings(statementPreview.sessionId, [statementReview.proposals[0].id]), /Acknowledge every not-checked/);
+  await applyApprovedFindings(statementPreview.sessionId, [statementReview.proposals[0].id], [statementReview.proposals[0].id]);
+  assert.equal(getSession(statementPreview.sessionId).applied, true);
+  removeSession(statementPreview.sessionId);
 });

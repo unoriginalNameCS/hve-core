@@ -1,0 +1,25 @@
+[
+  {
+    "invoiceNumber": "INV-1042",
+    "status": "approved",
+    "country": "US",
+    "subtotal": 740,
+    "discountCode": "SAVE",
+    "customer": { "name": "Avery Chen", "tier": "gold" },
+    "items": [
+      { "sku": "WID-17", "description": "Field sensor", "category": "hardware", "quantity": 2, "unitPrice": 240, "taxable": true },
+      { "sku": "SRV-04", "description": "Calibration", "category": "service", "quantity": 1, "unitPrice": 260, "discount": 20, "taxable": true }
+    ]
+  },
+  {
+    "invoiceNumber": "INV-1043",
+    "status": "review",
+    "country": "CA",
+    "subtotal": 190,
+    "discountCode": "",
+    "customer": { "name": "Morgan Patel", "tier": "silver" },
+    "items": [
+      { "sku": "LIC-22", "description": "Annual license", "category": "software", "quantity": 1, "unitPrice": 190, "taxable": false }
+    ]
+  }
+]

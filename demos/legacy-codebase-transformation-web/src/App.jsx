@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { findProposalOverlaps, keepProposal } from './proposal-overlaps.mjs';
 
 const STEPS = [
-  { id: 'upload', number: '01', title: 'Upload' },
-  { id: 'consent', number: '02', title: 'Data review' },
-  { id: 'review', number: '03', title: 'Findings' },
-  { id: 'build', number: '04', title: 'Update + build' },
+  { id: 'upload', number: '01', title: 'Choose project' },
+  { id: 'assessment', number: '02', title: 'Assess locally' },
+  { id: 'review', number: '03', title: 'Review proposals' },
+  { id: 'build', number: '04', title: 'Build check' },
   { id: 'export', number: '05', title: 'Export' }
 ];
 const OMIT_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor', 'bin', 'obj', 'dist', 'build', 'coverage', 'generated', 'out', 'target']);
+const MAX_SELECTED_UNITS = 5;
 
 function formatBytes(value) {
   if (value < 1024) return `${value} B`;
@@ -22,7 +22,7 @@ function uploadableFiles(fileList) {
   for (const file of fileList) {
     const relativePath = file.webkitRelativePath;
     const segments = relativePath.split('/');
-    if (!relativePath || segments.some((segment) => OMIT_DIRECTORIES.has(segment.toLowerCase()))) {
+    if (!relativePath || segments.some((segment) => segment.startsWith('.') || OMIT_DIRECTORIES.has(segment.toLowerCase()))) {
       excluded += 1;
       continue;
     }
@@ -36,218 +36,337 @@ async function readError(response) {
   return result.error || `The request failed with status ${response.status}.`;
 }
 
-function DependencyEvidence({ assessment, selectedUpdates, onToggleUpdate }) {
-  const inventory = assessment.inventory;
-  const registry = assessment.registry || [];
-  const advisories = assessment.advisories || [];
-  const advisoryMatches = advisories.reduce((total, entry) => total + entry.matches.length, 0);
-  const selectedCandidates = registry.flatMap((entry) => (entry.declarations || [])
-    .filter((declaration) => selectedUpdates.has(entry.name) && declaration.updateCandidate)
-    .map((declaration) => ({ name: entry.name, version: declaration.updateCandidate.version })));
+function unitCost(unit, assessment) {
+  return unit.kind === 'file' ? assessment.units.filter((item) => item.kind === 'function' && item.path === unit.path).length : 1;
+}
 
+function DebtRating({ rating }) {
+  return <span className={`debt-rating rating-${rating || 'unknown'}`}>{rating || '?'}</span>;
+}
+
+function DependencyEvidence({ assessment, inventory, selectedUpdates, onToggleUpdate }) {
+  const registry = assessment?.registry || [];
+  const advisories = assessment?.advisories || [];
+  const advisoryMatches = advisories.reduce((total, item) => total + item.matches.length, 0);
   return (
     <section className="dependency-evidence" aria-labelledby="dependency-title">
       <div className="evidence-heading">
         <div>
-          <p className="eyebrow">NPM DEPENDENCY EVIDENCE</p>
-          <h3 id="dependency-title">{inventory.declarations.length} direct declarations · {inventory.occurrences.length} locked packages</h3>
+          <p className="eyebrow">DEPENDENCY REVIEW</p>
+          <h3 id="dependency-title">{inventory.declarations.length} direct packages · {inventory.occurrences.length} locked packages</h3>
         </div>
         <span className={`evidence-status status-${assessment.status}`}>{assessment.status}</span>
       </div>
-      <p className="evidence-note">Registry and OSV results are provider evidence, not compatibility or exploitability decisions. No package files were changed.</p>
-
+      <p className="evidence-note">Registry and OSV results are provider evidence, not compatibility guarantees. Package files remain unchanged until the staged build succeeds.</p>
       <details className="evidence-details" open>
         <summary>Local package inventory</summary>
-        {inventory.declarations.length ? (
-          <div className="evidence-list">
-            {inventory.declarations.map((entry, index) => (
-              <div className="evidence-row" key={`${entry.manifest}-${entry.name}-${index}`}>
-                <strong>{entry.name}</strong>
-                <span>{entry.spec}</span>
-                <small>{entry.groups.join(', ')} · locked {entry.lockedVersions.join(', ') || 'unknown'}</small>
-              </div>
-            ))}
-          </div>
-        ) : <p className="evidence-empty">No valid direct npm declarations found.</p>}
+        <div className="evidence-list">
+          {inventory.declarations.map((entry, index) => (
+            <div className="evidence-row" key={`${entry.manifest}-${entry.name}-${index}`}>
+              <strong>{entry.name}</strong><span>{entry.spec}</span>
+              <small>{entry.groups.join(', ')} · locked {entry.lockedVersions.join(', ') || 'unknown'}</small>
+            </div>
+          ))}
+          {!inventory.declarations.length && <p className="evidence-empty">No valid direct npm declarations found.</p>}
+        </div>
       </details>
-
-      {assessment.status === 'not-approved' && <p className="local-note">Public metadata lookups were not approved. Only the local package inventory is shown.</p>}
       {registry.length > 0 && (
         <details className="evidence-details" open>
-          <summary>npm Registry evidence · {registry.length} package names</summary>
+          <summary>Registry evidence · {registry.length} package names</summary>
           <div className="evidence-list">
             {registry.map((entry) => (
               <div className="evidence-row" key={entry.name}>
-                <strong>{entry.name}</strong>
-                <span>{entry.status}</span>
+                <strong>{entry.name}</strong><span>{entry.status}</span>
                 <small>Latest tag: {entry.latest?.version || 'unknown'} · latest stable nondeprecated: {entry.latestStable?.version || 'unknown'}</small>
                 {entry.lockedVersions.filter((version) => version.deprecated).map((version) => (
-                  <small className="evidence-warning" key={`${entry.name}-${version.version}`}>
-                    {version.version} is deprecated: {version.deprecated}
-                  </small>
+                  <small className="evidence-warning" key={`${entry.name}-${version.version}`}>{version.version} is deprecated: {version.deprecated}</small>
                 ))}
-                {inventory.buildAvailable && inventory.buildScript && entry.declarations.some((declaration) => declaration.updateCandidate) && (
+                {inventory.buildAvailable && inventory.buildScript && entry.declarations.some((item) => item.updateCandidate) && (
                   <div className="update-candidates">
-                    {entry.declarations.filter((declaration) => declaration.updateCandidate).map((declaration) => (
+                    {entry.declarations.filter((item) => item.updateCandidate).map((declaration) => (
                       <label className="update-choice" key={`${entry.name}-${declaration.manifest}`}>
                         <input type="checkbox" checked={selectedUpdates.has(entry.name)} onChange={() => onToggleUpdate(entry.name)} />
                         <span className="checkmark" aria-hidden="true" />
-                        <span><strong>Update {entry.name}</strong><small>{declaration.lockedVersions.join(', ') || 'unknown'} → {declaration.updateCandidate.version}; build verification required</small></span>
+                        <span><strong>Update {entry.name}</strong><small>{declaration.lockedVersions.join(', ') || 'unknown'} to {declaration.updateCandidate.version}; build verification required</small></span>
                       </label>
                     ))}
                   </div>
                 )}
               </div>
             ))}
-            {(!inventory.buildAvailable || !inventory.buildScript) && <p className="local-note">A supported single-root npm lock and build script are required before dependency updates can be prepared.</p>}
           </div>
         </details>
       )}
-
-      {selectedCandidates.length > 0 && (
-        <p className="disclosure-warning">
-          Resolving {selectedCandidates.map((candidate) => `${candidate.name}@${candidate.version}`).join(', ')} runs
-          `npm install --package-lock-only --ignore-scripts` in a temporary copy. npm may request metadata for
-          transitive packages not listed here. Lifecycle scripts do not run during resolution.
-        </p>
-      )}
-
       {advisories.length > 0 && (
-        <details className="evidence-details" open>
-          <summary>OSV exact-version evidence · {advisoryMatches} matches</summary>
+        <details className="evidence-details">
+          <summary>OSV evidence · {advisoryMatches} matches</summary>
           <div className="evidence-list">
             {advisories.map((entry) => (
               <div className="evidence-row" key={`${entry.name}@${entry.version}`}>
                 <strong>{entry.name} @ {entry.version}</strong>
                 {!entry.matches.length && <span>{entry.status === 'completed' ? 'No advisory returned' : entry.status}</span>}
-                {entry.matches.map((match) => (
-                  <small className="evidence-warning" key={match.id}>
-                    {match.id}{match.aliases.length ? ` · ${match.aliases.join(', ')}` : ''}
-                    {match.summary ? ` · ${match.summary}` : ''}
-                    {match.fixedVersions.length ? ` · advisory fixed versions: ${match.fixedVersions.join(', ')}` : ''}
-                  </small>
-                ))}
+                {entry.matches.map((match) => <small className="evidence-warning" key={match.id}>{match.id}{match.summary ? ` · ${match.summary}` : ''}</small>)}
               </div>
             ))}
           </div>
         </details>
       )}
-
-      {assessment.gaps.length > 0 && (
-        <details className="evidence-details">
-          <summary>{assessment.gaps.length} coverage gaps</summary>
-          <ul className="gap-list">{assessment.gaps.map((gap, index) => <li key={`${gap.source}-${gap.path}-${index}`}>{gap.path || gap.name || gap.source}: {gap.reason}</li>)}</ul>
-        </details>
-      )}
+      {assessment.gaps?.length > 0 && <p className="local-note">{assessment.gaps.length} dependency coverage gaps are included in the report.</p>}
+      {(!inventory.buildAvailable || !inventory.buildScript) && <p className="local-note">Dependency updates are unavailable without a supported root npm lockfile and build script.</p>}
     </section>
+  );
+}
+
+function GateList({ gates = [] }) {
+  return (
+    <ul className="gate-list">
+      {gates.map((item) => <li className={`gate-${item.status}`} key={item.id}><strong>{item.status}</strong><span>{item.id}</span><small>{item.message}</small></li>)}
+    </ul>
+  );
+}
+
+function findingLocation(item) {
+  if (!item.line) return 'Whole unit';
+  return item.column ? `Line ${item.line}:${item.column}` : `Line ${item.line}`;
+}
+
+function NumberedSource({ unit, approvedFindings, activeLine, onSelectLine }) {
+  const containerRef = useRef(null);
+  const byLine = new Map();
+  for (const item of unit.findings) {
+    if (item.line) byLine.set(item.line, [...(byLine.get(item.line) ?? []), item]);
+  }
+  useEffect(() => {
+    const container = containerRef.current;
+    const row = container?.querySelector(`[data-line="${activeLine}"]`);
+    if (row) container.scrollTop = row.offsetTop - container.clientHeight / 2;
+  }, [activeLine, unit.id]);
+  return (
+    <div className="source-preview numbered-source" ref={containerRef} role="region" aria-label={`${unit.name} source with line numbers`} tabIndex={0}>
+      {unit.originalText.split(/\r?\n/).map((text, index) => {
+        const line = unit.startLine + index;
+        const flagged = byLine.get(line) ?? [];
+        const approved = flagged.some((item) => approvedFindings.has(item.id));
+        return (
+          <div key={line} data-line={line}
+            className={`source-line ${flagged.length ? approved ? 'is-flagged' : 'is-flagged-skipped' : ''} ${activeLine === line ? 'is-active' : ''}`}
+            onClick={flagged.length ? () => onSelectLine(line) : undefined}
+            title={flagged.length ? flagged.map((item) => `${item.ruleId}: ${item.message}`).join('\n') : undefined}>
+            <span className="line-number" aria-hidden="true">{line}</span>
+            <code>{text || ' '}</code>
+            {flagged.length > 0 && <span className="line-flag">{flagged.length}</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function lineDiff(left, right) {
+  const a = left.split('\n');
+  const b = right.split('\n');
+  const lengths = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      lengths[i][j] = a[i] === b[j] ? lengths[i + 1][j + 1] + 1 : Math.max(lengths[i + 1][j], lengths[i][j + 1]);
+    }
+  }
+  const leftChanged = new Array(a.length).fill(true);
+  const rightChanged = new Array(b.length).fill(true);
+  for (let i = 0, j = 0; i < a.length && j < b.length;) {
+    if (a[i] === b[j]) { leftChanged[i] = false; rightChanged[j] = false; i += 1; j += 1; }
+    else if (lengths[i + 1][j] >= lengths[i][j + 1]) i += 1;
+    else j += 1;
+  }
+  return { left: a.map((text, index) => ({ text, changed: leftChanged[index] })), right: b.map((text, index) => ({ text, changed: rightChanged[index] })) };
+}
+
+function DiffPre({ lines, kind }) {
+  const ref = useRef(null);
+  const content = lines.map((line) => `${line.changed ? '!' : ' '}${line.text}`).join('\n');
+  useEffect(() => {
+    const first = ref.current?.querySelector('.diff-line.is-changed');
+    if (first) ref.current.scrollTop = first.offsetTop - ref.current.clientHeight / 3;
+  }, [content]);
+  return (
+    <pre ref={ref} className="diff-pre">
+      {lines.map((line, index) => (
+        <span key={index} className={`diff-line ${line.changed ? `is-changed diff-${kind}` : ''}`}>{line.text || ' '}</span>
+      ))}
+    </pre>
+  );
+}
+
+function BaselineTable({ proposal }) {
+  const cases = proposal.baseline?.status === 'passed' ? proposal.baseline.cases || [] : [];
+  const results = new Map((proposal.comparison?.cases || []).map((item) => [item.description, item]));
+  const firstFailure = cases.findIndex((item) => results.get(item.description)?.passed === false);
+  const [active, setActive] = useState(Math.max(firstFailure, 0));
+  const tabRefs = useRef([]);
+  if (proposal.baseline?.status !== 'passed') {
+    return <p className="local-note">Characterisation not checked: {proposal.baseline?.reason || 'no stable baseline was available.'}</p>;
+  }
+  const tabCount = cases.length + (proposal.testPreview ? 1 : 0);
+  const statusOf = (item) => {
+    const result = results.get(item.description);
+    return result ? result.passed ? 'PASS' : 'FAIL' : 'NOT RUN';
+  };
+  const selectTab = (index) => {
+    const next = (index + tabCount) % tabCount;
+    setActive(next);
+    tabRefs.current[next]?.focus();
+  };
+  const onKeyDown = (event) => {
+    const moves = { ArrowRight: active + 1, ArrowLeft: active - 1, Home: 0, End: tabCount - 1 };
+    if (event.key in moves) { event.preventDefault(); selectTab(moves[event.key]); }
+  };
+  const passed = cases.filter((item) => statusOf(item) === 'PASS').length;
+  const current = cases[active];
+  const currentResult = current && results.get(current.description);
+  const idBase = `case-${proposal.id}`;
+  return (
+    <div className="baseline-list">
+      <p className="local-note">Each case calls the original function in an isolated Node process (run twice to confirm it is stable), then calls the rewrite with the same input and compares the result. {results.size ? `${passed} of ${cases.length} cases match.` : ''}</p>
+      {proposal.comparison?.status === 'not-checked' && <p className="local-note">Case comparison was not run: {proposal.comparison.reason || 'a static gate blocked it.'}</p>}
+      <div className="case-tabs" role="tablist" aria-label={`Characterisation cases for ${proposal.name}`} onKeyDown={onKeyDown}>
+        {cases.map((item, index) => {
+          const caseStatus = statusOf(item);
+          return (
+            <button type="button" role="tab" key={`${item.description}-${index}`} id={`${idBase}-tab-${index}`}
+              ref={(node) => { tabRefs.current[index] = node; }} aria-selected={index === active} aria-controls={`${idBase}-panel`}
+              tabIndex={index === active ? 0 : -1} className={`case-tab ${index === active ? 'is-active' : ''}`} onClick={() => setActive(index)}>
+              <span className={caseStatus === 'PASS' ? 'case-pass' : caseStatus === 'FAIL' ? 'case-fail' : 'case-not-run'}>{caseStatus}</span>
+              <span>Case {index + 1}</span>
+            </button>
+          );
+        })}
+        {proposal.testPreview && (
+          <button type="button" role="tab" id={`${idBase}-tab-${cases.length}`} ref={(node) => { tabRefs.current[cases.length] = node; }}
+            aria-selected={active === cases.length} aria-controls={`${idBase}-panel`} tabIndex={active === cases.length ? 0 : -1}
+            className={`case-tab ${active === cases.length ? 'is-active' : ''}`} onClick={() => setActive(cases.length)}>
+            <span>Test file</span>
+          </button>
+        )}
+      </div>
+      {active === cases.length && proposal.testPreview && (
+        <div className="case-panel" role="tabpanel" id={`${idBase}-panel`} aria-labelledby={`${idBase}-tab-${cases.length}`}>
+          <p className="case-description">Exported as <code>{proposal.testPreview.path}</code> when this proposal is applied. Run it with <code>node --test</code> to replay these cases against your code.</p>
+          <pre className="test-preview">{proposal.testPreview.content}</pre>
+        </div>
+      )}
+      {current && (
+        <div className="case-panel" role="tabpanel" id={`${idBase}-panel`} aria-labelledby={`${idBase}-tab-${active}`}>
+          <p className="case-description">{current.description}</p>
+          {currentResult?.differences?.length > 0 && <div className="case-differences" role="note">
+            <span>DIFFERENCES</span>
+            <ul>{currentResult.differences.map((item) => (
+              <li key={item.path}><code>{item.path}</code> expected <code>{JSON.stringify(item.expected)}</code>, got <code>{JSON.stringify(item.actual)}</code></li>
+            ))}</ul>
+          </div>}
+          <div className="baseline-values">
+            <div><span>INPUT</span><pre>{JSON.stringify(current.args, null, 2)}</pre></div>
+            {currentResult && !currentResult.passed ? (() => {
+              const diff = lineDiff(JSON.stringify(current.expected, null, 2), JSON.stringify(currentResult.actual, null, 2));
+              return <>
+                <div><span>EXPECTED (ORIGINAL)</span><DiffPre lines={diff.left} kind="removed" /></div>
+                <div><span>ACTUAL (REWRITE)</span><DiffPre lines={diff.right} kind="added" /></div>
+              </>;
+            })() : <>
+              <div><span>EXPECTED (ORIGINAL)</span><pre>{JSON.stringify(current.expected, null, 2)}</pre></div>
+              <div><span>ACTUAL (REWRITE)</span><pre>{JSON.stringify(currentResult?.actual ?? 'No comparison result', null, 2)}</pre></div>
+            </>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
+}
+
+const PROGRESS_LABELS = {
+  starting: 'Starting',
+  'dependency-assessment': 'Checking dependencies',
+  'unit-start': 'Preparing',
+  inputs: 'Generating test inputs for',
+  baseline: 'Capturing baseline for',
+  rewrite: 'Requesting rewrite for',
+  comparison: 'Replaying cases against rewrite of',
+  'unit-complete': 'Finished',
+  complete: 'Finishing up'
+};
+
+function progressLabel(progress, units) {
+  const label = PROGRESS_LABELS[progress?.stage] ?? 'Working';
+  const unit = units.find((item) => item.id === progress?.unitId);
+  const target = unit && /(for|of)$/.test(label) ? ` ${unit.name}` : '';
+  const retry = progress?.attempt > 1 ? ' (retry)' : '';
+  const caseText = progress?.case ? ` · case ${progress.case}` : '';
+  return `${label}${target}${retry}${caseText}`;
+}
+
+function AcknowledgeDialog({ proposals, onConfirm, onCancel }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    if (dialog && !dialog.open) dialog.showModal();
+    return () => { if (dialog?.open) dialog.close(); };
+  }, []);
+  return (
+    <dialog ref={ref} className="overlap-dialog ack-dialog" aria-labelledby="ack-dialog-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}>
+      <p className="eyebrow">ACKNOWLEDGEMENT REQUIRED</p>
+      <h2 id="ack-dialog-title">Behaviour was not checked for {proposals.length === 1 ? 'this change' : 'these changes'}</h2>
+      <p>No characterisation cases ran for the selected proposals below, so nothing confirmed that the rewrite returns the same results as the original. Static gates still passed. Acknowledge to apply them anyway, or go back and review.</p>
+      <ul className="ack-list">{proposals.map((proposal) => (
+        <li key={proposal.id}><strong>{proposal.name}</strong> <span>{proposal.path}</span>
+          <small>{proposal.baseline?.reason || proposal.comparison?.reason || 'Characterisation was not run.'}</small></li>
+      ))}</ul>
+      <div className="ack-actions">
+        <button className="button button-quiet" type="button" onClick={onCancel}>Go back</button>
+        <button className="button button-primary" type="button" onClick={onConfirm}>Acknowledge and continue</button>
+      </div>
+    </dialog>
   );
 }
 
 function ChangeReport({ report }) {
   return (
     <section className="change-report" aria-labelledby="change-report-title">
-      <p className="eyebrow">CHANGE REPORT</p>
-      <h3 id="change-report-title">What changed</h3>
+      <p className="eyebrow">TECH-DEBT REPORT</p>
+      <h3 id="change-report-title">Assessment delta</h3>
+      <div className="report-rating-row">
+        <span><DebtRating rating={report.before?.rating} /> {report.before?.debtMinutes ?? 0} min before</span>
+        <span aria-hidden="true">to</span>
+        <span><DebtRating rating={report.after?.rating} /> {report.after?.debtMinutes ?? 0} min after</span>
+      </div>
       <ul className="report-summary">
-        <li>{report.sourceChanges.length} source changes</li>
+        <li>{report.sourceChanges.length} source units</li>
         <li>{report.packageChanges.length} package updates</li>
-        <li>{report.lockChanges.length + report.omittedLockChanges} lock entries</li>
-        <li>Build: {report.build ? report.build.status : 'not run'}</li>
-        <li>Tests: {report.tests}</li>
+        <li>Build: {report.build?.status || 'not run'}</li>
+        {report.build?.characterisation && <li>Characterisation after update: {report.build.characterisation.status}{report.build.characterisation.results.map((item) => ` · ${item.name} ${item.matched}/${item.total}`).join('')}</li>}
+        <li>{report.tests}</li>
       </ul>
-
+      {report.testFiles?.length > 0 && <div className="report-test-files">
+        <p className="eyebrow">CHARACTERISATION TESTS IN THE ZIP</p>
+        <ul>{report.testFiles.map((file) => <li key={file}><code>{file}</code></li>)}</ul>
+        <p className="local-note">Run them from the project folder with <code>node --test __characterisation__</code>.</p>
+      </div>}
       {report.sourceChanges.map((change) => (
-        <article className="report-item" key={change.id}>
-          <div className="finding-meta">
-            <span className="finding-path">{change.path}</span>
-            <span>lines {change.startLine}–{change.endLine}</span>
-            <span>{change.symbol}</span>
-            <span>{change.category}</span>
-          </div>
+        <details className="report-item" key={change.id}>
+          <summary>{change.path} · {change.symbol} · {change.category}</summary>
           <p className="finding-rationale">{change.rationale}</p>
           <div className="change-columns">
             <div><span>BEFORE</span><pre>{change.before}</pre></div>
             <div><span>AFTER</span><pre>{change.after}</pre></div>
           </div>
-        </article>
+          <GateList gates={change.gates} />
+        </details>
       ))}
-
-      {report.packageChanges.length > 0 && (
-        <div className="report-item">
-          <p className="eyebrow">PACKAGE UPDATES</p>
-          {report.packageChanges.map((update) => (
-            <div className="update-diff-row" key={update.name}>
-              <strong>{update.name}</strong>
-              <span>{update.fromVersion}</span>
-              <span>→ {update.version}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {report.lockChanges.length > 0 && (
-        <details className="report-item">
-          <summary>Lockfile changes ({report.lockChanges.length + report.omittedLockChanges})</summary>
-          {report.lockChanges.map((entry) => (
-            <div className="update-diff-row" key={entry.path}>
-              <strong>{entry.name}</strong>
-              <span>{entry.from || 'new'}</span>
-              <span>→ {entry.to || 'removed'}</span>
-            </div>
-          ))}
-        </details>
-      )}
-
-      {report.build && (
-        <details className="report-item">
-          <summary>Build output ({report.build.command})</summary>
-          <pre className="report-output">{report.build.output || 'No output.'}</pre>
-        </details>
-      )}
+      {report.packageChanges.map((item) => <p className="report-item" key={item.name}>{item.name}: {item.fromVersion} to {item.version}</p>)}
+      {report.build && <details className="report-item"><summary>Build output</summary><pre className="report-output">{report.build.output || 'No output.'}</pre></details>}
     </section>
-  );
-}
-
-function OverlapComparison({ pair, selected, onKeep, onClose }) {
-  const dialogRef = useRef(null);
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const previousFocus = document.activeElement;
-    dialog.showModal();
-    return () => {
-      dialog.close();
-      previousFocus?.focus();
-    };
-  }, []);
-
-  return (
-    <dialog ref={dialogRef} className="overlap-dialog" aria-labelledby="overlap-title" aria-describedby="overlap-location" onClose={(event) => {
-      if (!event.currentTarget.open) onClose();
-    }} onCancel={(event) => {
-      event.preventDefault();
-      onClose();
-    }}>
-      <div className="overlap-dialog-heading">
-        <h2 id="overlap-title">Proposal {pair.leftNumber} vs {pair.rightNumber}</h2>
-        <button className="button button-quiet" type="button" onClick={onClose} autoFocus>Close comparison</button>
-      </div>
-      <p id="overlap-location" className="overlap-location">{pair.left.path}<br />Shared source: {pair.start.line}:{pair.start.character + 1} to {pair.end.line}:{pair.end.character + 1} (end exclusive)</p>
-      <div className="overlap-comparison">
-        {[{ finding: pair.left, number: pair.leftNumber, other: pair.right },
-          { finding: pair.right, number: pair.rightNumber, other: pair.left }].map(({ finding, number, other }) => (
-          <section className="overlap-alternative" key={finding.id} aria-labelledby={`alternative-${number}`}>
-            <h3 id={`alternative-${number}`}>Proposal {number} <span>{selected.has(finding.id) ? 'Selected' : 'Not selected'}</span></h3>
-            <p className="finding-meta">{finding.symbol} · lines {finding.range.startLine}-{finding.range.endLine} · {finding.confidence} confidence</p>
-            <p className="finding-rationale">{finding.rationale}</p>
-            <div className="change-columns">
-              <div><span>BEFORE</span><pre>{finding.originalText}</pre></div>
-              <div><span>PROPOSED</span><pre>{finding.replacementText}</pre></div>
-            </div>
-            <button className="button button-primary" type="button" onClick={() => onKeep(finding.id, other.id)}>Keep proposal {number}</button>
-          </section>
-        ))}
-      </div>
-    </dialog>
   );
 }
 
@@ -257,12 +376,17 @@ export default function App() {
   const [connection, setConnection] = useState({ loading: true, configured: false, model: 'gpt-4.1-mini' });
   const [folder, setFolder] = useState(null);
   const [prepared, setPrepared] = useState(null);
-  const [sourceConsent, setSourceConsent] = useState(false);
-  const [dependencyConsent, setDependencyConsent] = useState(false);
   const [review, setReview] = useState(null);
-  const [selected, setSelected] = useState(new Set());
-  const [comparedPair, setComparedPair] = useState(null);
+  const [selectedUnits, setSelectedUnits] = useState(new Set());
+  const [approvedFindings, setApprovedFindings] = useState(new Set());
+  const [checkDependencies, setCheckDependencies] = useState(false);
+  const [ackPrompt, setAckPrompt] = useState(null);
+  const [activeLine, setActiveLine] = useState(null);
+  const [focusedUnitId, setFocusedUnitId] = useState(null);
+  const [selectedProposals, setSelectedProposals] = useState(new Set());
+  const [acknowledgedWarnings, setAcknowledgedWarnings] = useState(new Set());
   const [selectedUpdates, setSelectedUpdates] = useState(new Set());
+  const [progress, setProgress] = useState(null);
   const [updatePreview, setUpdatePreview] = useState(null);
   const [buildResult, setBuildResult] = useState(null);
   const [buildAcknowledged, setBuildAcknowledged] = useState(false);
@@ -271,11 +395,23 @@ export default function App() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    fetch('/api/status')
-      .then((response) => response.json())
+    fetch('/api/status').then((response) => response.json())
       .then((status) => setConnection({ loading: false, ...status }))
       .catch(() => setConnection({ loading: false, configured: false, model: 'gpt-4.1-mini' }));
   }, []);
+
+  useEffect(() => { setActiveLine(null); }, [focusedUnitId]);
+
+  useEffect(() => {
+    if (busy !== 'transform' || !prepared?.sessionId) return undefined;
+    let active = true;
+    const timer = setInterval(() => {
+      fetch(`/api/sessions/${prepared.sessionId}/progress`).then((response) => response.ok ? response.json() : null)
+        .then((value) => { if (active && value) setProgress(value); })
+        .catch(() => {});
+    }, 700);
+    return () => { active = false; clearInterval(timer); };
+  }, [busy, prepared?.sessionId]);
 
   function selectFolder(event) {
     const { files, excluded } = uploadableFiles(event.target.files || []);
@@ -290,7 +426,7 @@ export default function App() {
       setError('Choose files from one folder at a time.');
     } else if (files.length > 500 || totalBytes > 25 * 1024 * 1024) {
       setFolder(null);
-      setError('This demo accepts up to 500 files and 25 MB per review. Exclude generated and dependency folders, then try again.');
+      setError('This demo accepts up to 500 files and 25 MB per review.');
     } else {
       setFolder({ files, excluded, totalBytes, name: folderName });
       setError('');
@@ -303,93 +439,148 @@ export default function App() {
     setError('');
     try {
       const form = new FormData();
-      const manifest = folder.files.map((file, index) => ({
-        id: `file-${index}`, path: file.webkitRelativePath, size: file.size
-      }));
+      const manifest = folder.files.map((file, index) => ({ id: `file-${index}`, path: file.webkitRelativePath, size: file.size }));
       form.append('manifest', JSON.stringify(manifest));
       folder.files.forEach((file, index) => form.append('files', file, `file-${index}`));
       const response = await fetch('/api/analyze/prepare', { method: 'POST', body: form });
       if (!response.ok) throw new Error(await readError(response));
       const result = await response.json();
       setPrepared(result);
-      setSourceConsent(false);
-      setDependencyConsent(false);
-      setStage('consent');
+      setSelectedUnits(new Set());
+      setApprovedFindings(new Set());
+      setActiveLine(null);
+      setFocusedUnitId(result.assessment.hotspots[0]?.id ?? result.assessment.units[0]?.id ?? null);
+      setStage('assessment');
     } catch (requestError) {
-      setError(requestError.message || 'The upload could not be prepared.');
+      setError(requestError.message || 'The project could not be assessed.');
     } finally {
       setBusy('');
     }
   }
 
-  async function confirmAnalysis() {
-    if (!prepared) return;
-    setBusy('analyze');
+  function fitsSelection(unit) {
+    const selectedCost = [...selectedUnits].reduce((total, id) => total + unitCost(prepared.assessment.units.find((item) => item.id === id), prepared.assessment), 0);
+    if (selectedCost + unitCost(unit, prepared.assessment) > MAX_SELECTED_UNITS) {
+      setError(`A transformation run is limited to ${MAX_SELECTED_UNITS} function or statement units.`);
+      return false;
+    }
+    return true;
+  }
+
+  function applyUnitFindings(unit, nextFindings) {
+    const anyApproved = unit.findings.some((item) => nextFindings.has(item.id));
+    const isSelected = selectedUnits.has(unit.id);
+    if (anyApproved && !isSelected && !fitsSelection(unit)) return;
+    const nextUnits = new Set(selectedUnits);
+    if (anyApproved) nextUnits.add(unit.id); else nextUnits.delete(unit.id);
+    setSelectedUnits(nextUnits);
+    setApprovedFindings(nextFindings);
+    setError('');
+  }
+
+  function toggleUnit(unit) {
+    if (!prepared || busy) return;
+    const next = new Set(approvedFindings);
+    const approve = !selectedUnits.has(unit.id);
+    for (const item of unit.findings) { if (approve) next.add(item.id); else next.delete(item.id); }
+    applyUnitFindings(unit, next);
+    setFocusedUnitId(unit.id);
+  }
+
+  function toggleFinding(unit, findingId) {
+    if (!prepared || busy) return;
+    const next = new Set(approvedFindings);
+    if (next.has(findingId)) next.delete(findingId); else next.add(findingId);
+    applyUnitFindings(unit, next);
+  }
+
+  function setAllFindings(unit, approve) {
+    if (!prepared || busy) return;
+    const next = new Set(approvedFindings);
+    for (const item of unit.findings) { if (approve) next.add(item.id); else next.delete(item.id); }
+    applyUnitFindings(unit, next);
+  }
+
+  async function confirmTransformation() {
+    if (!prepared || !selectedUnits.size || !connection.configured) return;
+    setBusy('transform');
+    setProgress({ stage: 'starting', completed: 0, total: selectedUnits.size, unitId: null });
     setError('');
     try {
-      const response = await fetch(`/api/sessions/${prepared.sessionId}/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceApproved: sourceConsent, dependencyApproved: dependencyConsent })
+      const response = await fetch(`/api/sessions/${prepared.sessionId}/transform`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unitIds: [...selectedUnits], findingIds: [...approvedFindings], checkDependencies, approved: true })
       });
       if (!response.ok) throw new Error(await readError(response));
       const result = await response.json();
       setReview(result);
-      setSelected(new Set());
+      setSelectedProposals(new Set());
+      setAcknowledgedWarnings(new Set());
       setSelectedUpdates(new Set());
       setStage('review');
     } catch (requestError) {
-      setError(requestError.message || 'Analysis could not be completed.');
+      setError(requestError.message || 'The approved analysis could not be completed.');
     } finally {
       setBusy('');
     }
   }
 
-  async function applySelected() {
-    if (selectedOverlaps.length) {
-      setComparedPair(selectedOverlaps[0]);
-      return;
-    }
-    if (selectedUpdates.size > 0) {
-      await prepareSelectedUpdates();
-      return;
-    }
-    if (!review || selected.size === 0) return;
-    setBusy('apply');
-    setError('');
-    try {
-      const response = await fetch(`/api/sessions/${review.sessionId}/apply`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approvedFindingIds: [...selected] })
-      });
-      if (!response.ok) throw new Error(await readError(response));
-      setApplied(await response.json());
-      setStage('export');
-    } catch (requestError) {
-      setError(requestError.message || 'Approved changes could not be applied.');
-    } finally {
-      setBusy('');
-    }
+  function toggleProposal(proposal) {
+    const next = new Set(selectedProposals);
+    if (next.has(proposal.id)) {
+      next.delete(proposal.id);
+      const warnings = new Set(acknowledgedWarnings);
+      warnings.delete(proposal.id);
+      setAcknowledgedWarnings(warnings);
+    } else next.add(proposal.id);
+    setSelectedProposals(next);
   }
 
-  async function prepareSelectedUpdates() {
-    if (!review || selectedUpdates.size === 0) return;
-    setBusy('update-prepare');
+  function toggleWarning(id) {
+    setAcknowledgedWarnings((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleUpdate(name) {
+    setSelectedUpdates((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
+
+  async function applySelected(acks = acknowledgedWarnings) {
+    if (!review) return;
+    const missing = review.proposals.filter((proposal) => selectedProposals.has(proposal.id) &&
+      proposal.warningAcknowledgementRequired && !acks.has(proposal.id));
+    if (missing.length) { setAckPrompt(missing); return; }
+    setBusy(selectedUpdates.size ? 'update-prepare' : 'apply');
     setError('');
     try {
-      const response = await fetch(`/api/sessions/${review.sessionId}/updates/prepare`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approvedFindingIds: [...selected], selectedUpdateNames: [...selectedUpdates] })
-      });
-      if (!response.ok) throw new Error(await readError(response));
-      setUpdatePreview(await response.json());
-      setBuildResult(null);
-      setBuildAcknowledged(false);
-      setStage('build');
+      if (selectedUpdates.size) {
+        const response = await fetch(`/api/sessions/${review.sessionId}/updates/prepare`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approvedProposalIds: [...selectedProposals], acknowledgedWarnings: [...acks], selectedUpdateNames: [...selectedUpdates] })
+        });
+        if (!response.ok) throw new Error(await readError(response));
+        setUpdatePreview(await response.json());
+        setBuildAcknowledged(false);
+        setBuildResult(null);
+        setStage('build');
+      } else {
+        const response = await fetch(`/api/sessions/${review.sessionId}/apply`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ approvedProposalIds: [...selectedProposals], acknowledgedWarnings: [...acks] })
+        });
+        if (!response.ok) throw new Error(await readError(response));
+        setApplied(await response.json());
+        setStage('export');
+      }
     } catch (requestError) {
-      setError(requestError.message || 'Dependency update preview could not be prepared.');
+      setError(requestError.message || 'The selected changes could not be staged.');
     } finally {
       setBusy('');
     }
@@ -401,23 +592,13 @@ export default function App() {
     setError('');
     try {
       const response = await fetch(`/api/sessions/${review.sessionId}/updates/build`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ previewId: updatePreview.previewId, acknowledgedBuild: true })
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `The build request failed with status ${response.status}.`);
-      if (result.status !== 'passed') {
-        setBuildResult(result);
-        return;
-      }
-      setApplied({
-        findings: result.summary.findings,
-        files: result.summary.files,
-        packages: result.summary.packages,
-        buildStatus: result.summary.buildStatus,
-        report: result.report
-      });
+      if (result.status !== 'passed') { setBuildResult(result); return; }
+      setApplied({ ...result.summary, report: result.report });
       setStage('export');
     } catch (requestError) {
       setError(requestError.message || 'The staged build could not be completed.');
@@ -428,414 +609,263 @@ export default function App() {
 
   function resetReview() {
     const sessionId = review?.sessionId || prepared?.sessionId;
-    if (sessionId) {
-      fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
-    }
-    setFolder(null);
-    setPrepared(null);
-    setSourceConsent(false);
-    setDependencyConsent(false);
-    setReview(null);
-    setSelected(new Set());
-    setComparedPair(null);
-    setSelectedUpdates(new Set());
-    setUpdatePreview(null);
-    setBuildResult(null);
-    setBuildAcknowledged(false);
-    setApplied(null);
-    setStage('upload');
-    setError('');
+    if (sessionId) fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    setFolder(null); setPrepared(null); setReview(null); setSelectedUnits(new Set()); setApprovedFindings(new Set()); setCheckDependencies(false); setActiveLine(null); setFocusedUnitId(null);
+    setSelectedProposals(new Set()); setAcknowledgedWarnings(new Set()); setSelectedUpdates(new Set());
+    setProgress(null); setUpdatePreview(null); setBuildResult(null); setBuildAcknowledged(false); setApplied(null);
+    setStage('upload'); setError('');
     if (inputRef.current) inputRef.current.value = '';
   }
 
-  function toggleFinding(id) {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function toggleUpdate(name) {
-    setSelectedUpdates((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
   const activeStep = STEPS.findIndex((item) => item.id === stage);
-  const hasDependencyLookups = Boolean(prepared && (prepared.dependencyPreview.registryNames.length || prepared.dependencyPreview.advisoryTuples.length));
-  const requiresCombinedApproval = Boolean(prepared?.sourceDisclosure.files.length && hasDependencyLookups);
-  const overlaps = findProposalOverlaps(review?.findings ?? []);
-  const selectedOverlaps = overlaps.filter((pair) => selected.has(pair.left.id) && selected.has(pair.right.id));
-
-  function keepComparedProposal(keepId, otherId) {
-    setSelected((current) => keepProposal(current, keepId, otherId));
-    setComparedPair(null);
-  }
+  const assessment = prepared?.assessment;
+  const dependencyInventory = prepared?.dependencyPreview;
+  const hotFiles = assessment?.files.map((file) => ({ ...file, units: file.units.filter((unit) => unit.findings.length > 0) })).filter((file) => file.units.length) ?? [];
+  const focusedUnit = assessment?.units.find((unit) => unit.id === focusedUnitId) ?? null;
+  const selectedUnitCount = [...selectedUnits].reduce((total, id) => total + unitCost(assessment.units.find((item) => item.id === id), assessment), 0);
+  const selectedProposalList = review?.proposals.filter((proposal) => selectedProposals.has(proposal.id)) ?? [];
+  const dependencyLookupsAvailable = Boolean(dependencyInventory?.registryNames.length || dependencyInventory?.advisoryTuples.length);
+  const canApply = selectedProposals.size > 0 || selectedUpdates.size > 0;
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="wordmark" href="#top" aria-label="Codebase Review home">
-          <span className="wordmark-mark">CR</span>
-          <span>CODEBASE <b>/</b> REVIEW</span>
+        <a className="wordmark" href="#top" aria-label="Technical debt assessor home">
+          <span className="wordmark-mark">TD</span><span>TECHNICAL DEBT <b>/</b> ASSESSOR</span>
         </a>
         <div className={`model-status ${connection.configured ? 'is-ready' : 'is-missing'}`}>
           <span className="status-dot" aria-hidden="true" />
-          <span>{connection.loading ? 'Checking Foundry' : connection.configured ? connection.model : 'Foundry not configured'}</span>
+          <span>{connection.loading ? 'Checking Foundry' : !connection.configured ? 'Foundry not configured'
+            : connection.rewriteModel && connection.rewriteModel !== connection.model
+              ? `${connection.model} · rewrite ${connection.rewriteModel}` : connection.model}</span>
         </div>
       </header>
 
       <main id="top">
-        <section className="intro-row">
+        <section className="tool-heading">
           <div>
-            <p className="eyebrow"><span className="eyebrow-mark" /> LOCAL TRANSFORMATION WORKSPACE</p>
-            <h1>Make the change<br /><em>after you review it.</em></h1>
-            <p className="intro-copy">Inspect a codebase, review exact proposed edits, and export only the changes you approve.</p>
+            <p className="eyebrow">LOCAL ASSESSMENT · APPROVAL-GATED TRANSFORMATION</p>
+            <h1>Technical debt assessor</h1>
           </div>
-          <nav className="stepper" aria-label="Review stages">
-            {STEPS.map((item, index) => (
-              <div className={`step ${index === activeStep ? 'active' : index < activeStep ? 'complete' : ''}`} key={item.id}>
-                <span>{item.number}</span>
-                <strong>{item.title}</strong>
-              </div>
-            ))}
+          <nav className="stepper" aria-label="Workflow stages">
+            {STEPS.map((item, index) => <div className={`step ${index === activeStep ? 'active' : index < activeStep ? 'complete' : ''}`} key={item.id}>
+              <span>{item.number}</span><strong>{item.title}</strong>
+            </div>)}
           </nav>
         </section>
 
         {error && <p className="alert" role="alert">{error}</p>}
 
         {stage === 'upload' && (
-          <section className="workspace-grid" aria-labelledby="upload-title">
+          <section className="upload-workspace" aria-labelledby="upload-title">
             <div className="upload-panel">
-              <div className="section-heading">
-                <span className="section-index">01</span>
-                <div>
-                  <p className="eyebrow">SOURCE FOLDER</p>
-                  <h2 id="upload-title">Choose a codebase</h2>
-                </div>
-              </div>
+              <p className="eyebrow">PROJECT FOLDER</p>
+              <h2 id="upload-title">Choose a codebase to assess</h2>
               <button className="folder-picker" type="button" onClick={() => inputRef.current?.click()} disabled={busy !== ''}>
                 <span className="picker-symbol" aria-hidden="true">+</span>
-                <span className="picker-text">
-                  <strong>{folder ? folder.name : 'Select folder'}</strong>
-                  <small>{folder ? `${folder.files.length} files · ${formatBytes(folder.totalBytes)}` : 'Choose a project folder from this device'}</small>
-                </span>
+                <span className="picker-text"><strong>{folder?.name || 'Select folder'}</strong>
+                  <small>{folder ? `${folder.files.length} files · ${formatBytes(folder.totalBytes)}` : 'JavaScript and JSX files are assessed locally'}</small></span>
                 <span className="picker-arrow" aria-hidden="true">↗</span>
               </button>
               <input ref={inputRef} className="visually-hidden" type="file" webkitdirectory="" directory="" multiple onChange={selectFolder} aria-label="Select project folder" />
-              {folder && (
-                <div className="upload-meta">
-                  <span>{folder.files.length} files queued</span>
-                  <span>{folder.excluded} generated/dependency files excluded</span>
-                </div>
-              )}
-              <div className="upload-footer">
-                <span>Up to 500 files · 25 MB total</span>
+              {folder && <p className="upload-meta">{folder.files.length} files · {folder.excluded} hidden/generated folders excluded · {formatBytes(folder.totalBytes)}</p>}
+              <div className="upload-footer"><span>Up to 500 files · 25 MB total</span>
                 <button className="button button-primary" type="button" onClick={prepareFolder} disabled={!folder || busy !== ''}>
-                    {busy === 'prepare' ? 'Preparing…' : 'Prepare review'}
+                  {busy === 'prepare' ? <><Spinner />Assessing locally...</> : 'Run local assessment'}
                 </button>
               </div>
-                {busy === 'prepare' && <p className="busy-note" role="status">Reading source and npm metadata locally. Nothing is sent to an external service yet.</p>}
+              {busy === 'prepare' && <p className="busy-note" role="status"><Spinner />Parsing source and calculating debt metrics. No code is sent or executed.</p>}
             </div>
-
-            <aside className="side-panel">
-              <p className="eyebrow">REVIEW BOUNDARIES</p>
-              <div className="boundary-item">
-                <span className="boundary-number">A</span>
-                <p>Only supported source files are sent to the selected Foundry deployment.</p>
-              </div>
-              <div className="boundary-item">
-                <span className="boundary-number">B</span>
-                <p>Original files stay unchanged. Edits apply to an in-memory copy.</p>
-              </div>
-              <div className="boundary-item">
-                <span className="boundary-number">C</span>
-                <p>Uploaded code runs only if you approve the staged build; tests and lifecycle scripts are not run.</p>
-              </div>
-              {!connection.configured && !connection.loading && (
-                <div className="config-note">
-                  <strong>Server configuration required</strong>
-                  <p>Set FOUNDRY_API_KEY, FOUNDRY_ENDPOINT, and FOUNDRY_MODEL in the demo server environment.</p>
-                </div>
-              )}
+            <aside className="local-boundaries">
+              <p className="eyebrow">LOCAL FIRST</p>
+              <p>Assessment parses source only. It makes no network requests, runs no project code, and needs no approval.</p>
+              <p>Foundry, npm/OSV, dependency installation, and function execution start only after you select units and approve the combined review.</p>
             </aside>
           </section>
         )}
 
-        {stage === 'consent' && prepared && (
-          <section className="consent-section" aria-labelledby="consent-title">
-            <div className="review-heading consent-heading">
-              <div>
-                <p className="eyebrow">02 / DATA TRANSFER REVIEW</p>
-                <h2 id="consent-title">Choose what may leave this app.</h2>
-                <p className="review-subtitle">The upload has been inspected locally. No model or metadata requests have been made.</p>
+        {stage === 'assessment' && prepared && assessment && (
+          <>
+            <section className="assessment-summary" aria-label="Technical debt summary">
+              <div className="rating-block"><DebtRating rating={assessment.rating} /><div><span className="eyebrow">PROJECT RATING</span><strong>{assessment.debtHours}h estimated debt</strong></div></div>
+              <div className="summary-metric"><strong>{assessment.findingCount}</strong><span>findings</span></div>
+              <div className="summary-metric"><strong>{assessment.loc.toLocaleString()}</strong><span>lines of code</span></div>
+              <div className="summary-metric"><strong>{assessment.files.length}</strong><span>source files</span></div>
+              <button className="button button-quiet" type="button" onClick={resetReview}>Choose another folder</button>
+            </section>
+
+            <section className="assessment-layout" aria-label="Assessment findings">
+              <div className="hotspot-pane">
+                <div className="pane-heading"><div><p className="eyebrow">HOTSPOTS</p><h2>Prioritize by estimated debt</h2></div><span>{selectedUnitCount}/{MAX_SELECTED_UNITS} units selected</span></div>
+                {assessment.gaps.length > 0 && <p className="local-note">{assessment.gaps.length} files could not be parsed; they are excluded from the rating.</p>}
+                {hotFiles.length ? hotFiles.map((file) => (
+                  <section className="hotspot-file" key={file.path}>
+                    <div className="hotspot-file-heading"><strong>{file.path}</strong><span><DebtRating rating={assessment.fileScores?.find((item) => item.path === file.path)?.rating} /> {file.findings.length} findings</span></div>
+                    {file.units.map((unit) => {
+                      const cost = unitCost(unit, assessment);
+                      return <label className={`hotspot-row ${focusedUnitId === unit.id ? 'is-focused' : ''}`} key={unit.id}>
+                        <input type="checkbox" checked={selectedUnits.has(unit.id)} onChange={() => toggleUnit(unit)} disabled={busy !== ''} />
+                        <span className="checkmark" aria-hidden="true" />
+                        <span className="hotspot-unit" onClick={() => setFocusedUnitId(unit.id)}>
+                          <strong>{unit.name}</strong><small>{unit.kind} · {unit.startLine}-{unit.endLine} · {cost} unit{cost === 1 ? '' : 's'} · {unit.findings.map((item) => item.ruleId).join(', ')}</small>
+                        </span>
+                      </label>;
+                    })}
+                  </section>
+                )) : <p className="empty-review">No configured code-smell thresholds were crossed.</p>}
               </div>
-              <button className="button button-quiet" type="button" onClick={resetReview}>Reject upload</button>
-            </div>
-
-            {prepared.sourceDisclosure.files.length > 0 && (
-              <section className="disclosure-block">
-                <label className="consent-choice">
-                  <input type="checkbox" checked={requiresCombinedApproval ? sourceConsent && dependencyConsent : sourceConsent} onChange={(event) => {
-                    const approved = event.target.checked;
-                    setSourceConsent(approved);
-                    if (requiresCombinedApproval) setDependencyConsent(approved);
-                  }} />
-                  <span className="checkmark" aria-hidden="true" />
-                  <span><strong>{requiresCombinedApproval ? 'Approve combined code and npm analysis' : 'Send source to Foundry'}</strong><small>{prepared.sourceDisclosure.files.length} files · {prepared.sourceDisclosure.chunks} chunks · {formatBytes(prepared.sourceDisclosure.bytes)} · model {connection.model}{requiresCombinedApproval ? ' · source and dependency evidence run together' : ''}</small></span>
-                </label>
-                <details className="disclosure-details">
-                  <summary>Show source file paths</summary>
-                  <ul>{prepared.sourceDisclosure.files.map((file) => <li key={file}>{file}</li>)}</ul>
-                </details>
-              </section>
-            )}
-
-            {prepared.dependencyPreview.documents.length > 0 && (
-              <section className="disclosure-block dependency-disclosure">
-                {requiresCombinedApproval ? (
-                  <p className="combined-approval-note"><strong>Included in combined approval</strong><span>{prepared.dependencyPreview.registryNames.length} Registry names · {prepared.dependencyPreview.advisoryTuples.length} exact OSV package/version tuples</span></p>
-                ) : (
-                  <label className="consent-choice">
-                    <input type="checkbox" checked={dependencyConsent} onChange={(event) => setDependencyConsent(event.target.checked)} />
-                    <span className="checkmark" aria-hidden="true" />
-                    <span><strong>Look up npm dependency metadata</strong><small>{prepared.dependencyPreview.registryNames.length} Registry names · {prepared.dependencyPreview.advisoryTuples.length} exact OSV package/version tuples</small></span>
-                  </label>
-                )}
-                <p className="local-note">Build check: {prepared.dependencyPreview.buildAvailable && prepared.dependencyPreview.buildScript ?
-                  `available (${prepared.dependencyPreview.buildScript})` : 'unavailable: a supported root npm lock and build script were not found'}.</p>
-                <p className="disclosure-warning">Package identifiers may reveal private project metadata. Only these names and exact locked versions are sent; manifests, source, and credentials are not sent to npm or OSV. {requiresCombinedApproval ? 'The combined approval above starts source and npm analysis together.' : 'No lookup happens unless you approve the displayed transfer.'}</p>
-                <div className="identifier-lists">
-                  <div>
-                    <span className="identifier-heading">NPM REGISTRY · GET</span>
-                    {prepared.dependencyPreview.registryNames.length ? <ul>{prepared.dependencyPreview.registryNames.map((name) => <li key={name}>{name}</li>)}</ul> : <p>None</p>}
+              <aside className="unit-detail-pane">
+                <p className="eyebrow">LOCAL DETAIL</p>
+                {focusedUnit ? <>
+                  <h2>{focusedUnit.name}</h2>
+                  <p className="detail-location">{focusedUnit.path} · lines {focusedUnit.startLine}-{focusedUnit.endLine}</p>
+                  <div className="metric-chips">{Object.entries(focusedUnit.metrics || {}).map(([key, value]) => <span key={key}>{key.replace(/[A-Z]/g, (letter) => ` ${letter.toLowerCase()}`)} <strong>{value}</strong></span>)}</div>
+                  <div className="finding-toolbar">
+                    <span>{focusedUnit.findings.filter((item) => approvedFindings.has(item.id)).length} of {focusedUnit.findings.length} findings approved for transformation</span>
+                    <div>
+                      <button className="button button-quiet button-small" type="button" onClick={() => setAllFindings(focusedUnit, true)}
+                        disabled={busy !== '' || focusedUnit.findings.every((item) => approvedFindings.has(item.id))}>Select all</button>
+                      <button className="button button-quiet button-small" type="button" onClick={() => setAllFindings(focusedUnit, false)}
+                        disabled={busy !== '' || !focusedUnit.findings.some((item) => approvedFindings.has(item.id))}>Clear all</button>
+                    </div>
                   </div>
-                  <div>
-                    <span className="identifier-heading">OSV · POST</span>
-                    {prepared.dependencyPreview.advisoryTuples.length ? <ul>{prepared.dependencyPreview.advisoryTuples.map((tuple) => <li key={`${tuple.name}@${tuple.version}`}>{tuple.name} @ {tuple.version}</li>)}</ul> : <p>None</p>}
-                  </div>
-                </div>
-                {prepared.dependencyPreview.gaps.length > 0 && (
-                  <details className="disclosure-details">
-                    <summary>{prepared.dependencyPreview.gaps.length} local inventory gaps</summary>
-                    <ul>{prepared.dependencyPreview.gaps.map((gap, index) => <li key={`${gap.path}-${index}`}>{gap.path}: {gap.reason}</li>)}</ul>
-                  </details>
-                )}
-              </section>
-            )}
-            {prepared.dependencyPreview.documents.length === 0 && <p className="local-note">No npm manifest or lockfile was found. No npm or OSV requests will be made.</p>}
-            {!prepared.sourceDisclosure.files.length && <p className="local-note">No supported source files were found. You can review npm metadata only.</p>}
+                  <ul className="unit-findings">{focusedUnit.findings.map((item) => (
+                    <li key={item.id} className={item.line && activeLine === item.line ? 'is-active' : ''}>
+                      <label className="finding-approve">
+                        <input type="checkbox" checked={approvedFindings.has(item.id)} onChange={() => toggleFinding(focusedUnit, item.id)} disabled={busy !== ''}
+                          aria-label={`Approve ${item.ruleId} at ${findingLocation(item)}`} />
+                        <span className="checkmark" aria-hidden="true" />
+                      </label>
+                      <strong>{item.severity}</strong>
+                      <span>{item.ruleId}</span>
+                      <button type="button" className="finding-location" onClick={() => setActiveLine(item.line)} disabled={!item.line}>{findingLocation(item)}</button>
+                      <small>{item.message}</small>
+                    </li>
+                  ))}</ul>
+                  <NumberedSource unit={focusedUnit} approvedFindings={approvedFindings} activeLine={activeLine} onSelectLine={setActiveLine} />
+                </> : <p className="empty-review">Select a hotspot to inspect its local source and metrics.</p>}
+              </aside>
+            </section>
 
-            <div className="consent-footer">
-              <span>{requiresCombinedApproval ? 'Code and npm analyses require one approval and run together.' : 'Approve the available analysis before any external request.'}</span>
-              <button className="button button-primary" type="button" onClick={confirmAnalysis} disabled={busy !== '' ||
-                requiresCombinedApproval && !(sourceConsent && dependencyConsent) ||
-                !requiresCombinedApproval && prepared.sourceDisclosure.files.length > 0 && !sourceConsent ||
-                !requiresCombinedApproval && prepared.sourceDisclosure.files.length === 0 && hasDependencyLookups && !dependencyConsent}>
-                {busy === 'analyze' ? 'Analyzing…' : 'Continue with selected approvals'}
-              </button>
-            </div>
-            {busy === 'analyze' && <p className="busy-note" role="status">Running only the transfers you approved. This may take a few minutes.</p>}
-          </section>
+            <section className="approval-band" aria-labelledby="approval-title">
+              <div className="approval-heading"><div><p className="eyebrow">COMBINED APPROVAL</p><h2 id="approval-title">Review only the units you selected</h2></div>
+                <span>{selectedUnits.size} selected spans · {selectedUnitCount} function/statement units · {assessment.units.filter((unit) => selectedUnits.has(unit.id)).reduce((total, unit) => total + unit.findings.filter((item) => approvedFindings.has(item.id)).length, 0)} approved findings</span></div>
+              {dependencyLookupsAvailable && <label className="build-acknowledgement dependency-toggle">
+                <input type="checkbox" checked={checkDependencies} onChange={(event) => setCheckDependencies(event.target.checked)} disabled={busy !== ''} />
+                <span className="checkmark" aria-hidden="true" />
+                <span>Also check npm dependencies. Sends the package names and versions below to npm Registry and OSV, lists update candidates, and enables the dependency update and build check. Leave unticked for a source-only run.</span>
+              </label>}
+              <div className="approval-disclosures">
+                <p><strong>Foundry</strong><span>{[...selectedUnits].map((id) => assessment.units.find((unit) => unit.id === id)).filter(Boolean).map((unit) => `${unit.path} · ${unit.name}`).join('; ') || 'No source selected'}</span></p>
+                <p><strong>npm / OSV</strong><span>{!dependencyLookupsAvailable ? 'No npm metadata lookup is available' : checkDependencies ? `${dependencyInventory.registryNames.length} Registry package names · ${dependencyInventory.advisoryTuples.length} exact version tuples` : 'Skipped: dependency checks are off'}</span></p>
+                <p><strong>Local execution</strong><span>Selected functions run in a temporary copy; npm uses `ci --ignore-scripts`. Node limits filesystem access but does not block network access.</span></p>
+              </div>
+              {checkDependencies && dependencyInventory.documents.length > 0 && <details className="disclosure-details"><summary>Show package identifiers before approval</summary>
+                <div className="identifier-lists"><div><span className="identifier-heading">NPM REGISTRY</span><ul>{dependencyInventory.registryNames.map((name) => <li key={name}>{name}</li>)}</ul></div>
+                  <div><span className="identifier-heading">OSV LOCKED TUPLES</span><ul>{dependencyInventory.advisoryTuples.map((item) => <li key={`${item.name}@${item.version}`}>{item.name} @ {item.version}</li>)}</ul></div></div>
+              </details>}
+              {!connection.configured && !connection.loading && <p className="local-note">Configure FOUNDRY_API_KEY, FOUNDRY_ENDPOINT, and FOUNDRY_MODEL to request proposals.</p>}
+              <div className="consent-footer"><span>This approval starts selected source transfer{checkDependencies ? ', npm/OSV lookups' : ''}, dependency installation if a selected function needs it, and local function execution.</span>
+                <button className="button button-primary" type="button" onClick={confirmTransformation} disabled={!selectedUnits.size || !connection.configured || busy !== ''}>
+                  {busy === 'transform' ? <><Spinner />Transforming selected units...</> : 'Approve transfer and transform'}
+                </button></div>
+              {busy === 'transform' && <div className="busy-note busy-panel" role="status" aria-live="polite">
+                <Spinner /><span>{progressLabel(progress, assessment.units)}</span>
+                <span className="busy-count">{progress?.stage === 'complete' ? progress?.total : progress?.completed || 0} of {progress?.total || selectedUnitCount} units done</span>
+                <span className="busy-bar" aria-hidden="true"><span style={{ width: `${Math.round(((progress?.completed || 0) / (progress?.total || selectedUnitCount || 1)) * 100)}%` }} /></span>
+              </div>}
+            </section>
+          </>
         )}
 
         {stage === 'review' && review && (
-          <section className="review-section" aria-labelledby="review-title">
-            <div className="review-heading">
-              <div>
-                <p className="eyebrow">02 / FINDING REVIEW</p>
-                <h2 id="review-title">{review.findings.length ? `${review.findings.length} proposed changes` : review.sourceStatus === 'not-applicable' ? 'npm dependency evidence' : 'No changes proposed'}</h2>
-                <p className="review-subtitle">{review.summary.sourceFiles} source files · {review.summary.requests} model requests · {review.summary.dependencyRequests} npm/OSV requests</p>
-              </div>
-              <div className="review-actions">
-                <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject review</button>
-                <button className="button button-primary" type="button" onClick={applySelected}
-                  disabled={(selected.size === 0 && selectedUpdates.size === 0) || busy !== '' || selectedOverlaps.length > 0}
-                  aria-describedby={selectedOverlaps.length ? 'overlap-selection-status' : undefined}>
-                  {busy === 'apply' ? 'Applying…' : busy === 'update-prepare' ? 'Resolving update…' : selectedUpdates.size > 0 ?
-                    selected.size > 0 ?
-                      `Stage ${selected.size} source change${selected.size === 1 ? '' : 's'} + ${selectedUpdates.size} dependency update${selectedUpdates.size === 1 ? '' : 's'}` :
-                      `Resolve ${selectedUpdates.size} dependency update${selectedUpdates.size === 1 ? '' : 's'}` :
-                    `Approve ${selected.size} and transform`}
-                </button>
-              </div>
-            </div>
-
-            {review.sourceStatus === 'not-approved' && <p className="local-note">Source analysis was not approved. npm evidence is shown separately when available.</p>}
-            {review.sourceStatus === 'not-applicable' && <p className="local-note">No supported source files were found, so no Foundry request was made.</p>}
-            {review.sourceStatus === 'incomplete' && <p className="alert">Some source proposals could not be validated and were excluded. You can approve the validated findings below; analysis coverage is incomplete.</p>}
-            {review.sourceFailures.map((failure, index) => (
-              <p className="failure-line" key={`${failure.path}-${index}`}>{failure.path}: {failure.reason}</p>
-            ))}
-            {review.dependencyAssessment && <DependencyEvidence assessment={review.dependencyAssessment}
+          <section className="proposal-review" aria-labelledby="review-title">
+            <div className="review-heading"><div><p className="eyebrow">PROPOSAL REVIEW</p><h2 id="review-title">{review.proposals.length} selected-unit proposals</h2>
+              <p className="review-subtitle">{review.sourceDisclosure.units.length} source spans · {review.dependencyAssessment.status === 'skipped' ? 'dependency checks skipped' : `${review.dependencyAssessment.requests} npm/OSV lookups`} · no project tests run</p></div>
+              <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject review</button></div>
+            {review.dependencyAssessment?.inventory && review.dependencyAssessment.status !== 'skipped' && <DependencyEvidence assessment={review.dependencyAssessment} inventory={review.dependencyAssessment.inventory}
               selectedUpdates={selectedUpdates} onToggleUpdate={toggleUpdate} />}
-            {review.findings.length === 0 && review.complete && <p className="empty-review">The selected source did not produce an actionable refactor finding.</p>}
-            {overlaps.length > 0 && (
-              <section className="overlap-summary" aria-labelledby="overlap-summary-title">
-                <h3 id="overlap-summary-title">Overlapping proposals ({overlaps.length} {overlaps.length === 1 ? 'pair' : 'pairs'})</h3>
-                <p id="overlap-selection-status" role="status">{selectedOverlaps.length ?
-                  `${selectedOverlaps.length} selected ${selectedOverlaps.length === 1 ? 'pair conflicts' : 'pairs conflict'}. Choose one proposal per overlapping pair before staging.` :
-                  'No selected proposals conflict.'}</p>
-                <ul className="overlap-pairs">
-                  {overlaps.map((pair) => (
-                    <li key={pair.key}>
-                      <div><strong>Proposal {pair.leftNumber} + proposal {pair.rightNumber}</strong>
-                        <span>{pair.left.path} · shared lines {pair.start.line}-{pair.end.line}</span>
-                        <small>{selected.has(pair.left.id) && selected.has(pair.right.id) ? 'Both selected: conflict' : 'Alternative proposals'}</small></div>
-                      <button className="button button-quiet" type="button" onClick={() => setComparedPair(pair)} disabled={busy !== ''}>Compare proposals {pair.leftNumber} and {pair.rightNumber}</button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-            <div className="finding-list">
-              {review.findings.map((finding, index) => (
-                <article className={`finding ${selected.has(finding.id) ? 'selected' : ''}`} key={finding.id}>
-                  <label className="finding-select">
-                    <input type="checkbox" aria-label={`Select proposal ${index + 1}`} checked={selected.has(finding.id)} onChange={() => toggleFinding(finding.id)} disabled={busy !== ''} />
-                    <span className="checkmark" aria-hidden="true" />
-                    <span className="finding-number">{String(index + 1).padStart(2, '0')}</span>
-                  </label>
-                  <div className="finding-body">
-                    <div className="finding-meta">
-                      <span className="finding-path">{finding.path}</span>
-                      <span>{finding.symbol}</span>
-                      <span>{finding.category}</span>
-                      <span>{finding.confidence} confidence</span>
-                      <span>lines {finding.range.startLine}-{finding.range.endLine}</span>
-                    </div>
-                    <p className="finding-rationale">{finding.rationale}</p>
-                    <div className="finding-overlaps">
-                      {overlaps.filter((pair) => pair.left.id === finding.id || pair.right.id === finding.id).map((pair) => (
-                        <button className="overlap-link" key={pair.key} type="button" disabled={busy !== ''} onClick={() => setComparedPair(pair)}>
-                          Overlaps proposal {pair.left.id === finding.id ? pair.rightNumber : pair.leftNumber}: compare
-                        </button>
-                      ))}
-                    </div>
-                    <details className="change-details">
-                      <summary>Inspect exact change</summary>
-                      <div className="change-columns">
-                        <div><span>BEFORE</span><pre>{finding.originalText}</pre></div>
-                        <div><span>PROPOSED</span><pre>{finding.replacementText}</pre></div>
-                      </div>
-                    </details>
+            <div className="proposal-list">
+              {review.proposals.map((proposal, index) => (
+                <article className={`proposal-item ${selectedProposals.has(proposal.id) ? 'is-selected' : ''}`} key={proposal.id}>
+                  <div className="proposal-topline">
+                    <label className="proposal-select"><input type="checkbox" checked={selectedProposals.has(proposal.id)} onChange={() => toggleProposal(proposal)} disabled={proposal.status !== 'ready' || busy !== ''} />
+                      <span className="checkmark" aria-hidden="true" /><strong>{String(index + 1).padStart(2, '0')} · {proposal.name}</strong></label>
+                    <span className={`proposal-status status-${proposal.status}`}>{proposal.status}</span>
                   </div>
+                  <p className="detail-location">{proposal.path}</p>
+                  {proposal.targetFindings?.length > 0 && <details className="evidence-details target-findings" open={proposal.status !== 'ready'}>
+                    <summary>Approved findings targeted ({proposal.targetFindings.length})</summary>
+                    <ul className="residual-list">{proposal.targetFindings.map((finding) => (
+                      <li key={finding.id}><strong>{finding.severity} · {finding.ruleId}</strong> · {findingLocation(finding)}: {finding.message}</li>
+                    ))}</ul>
+                  </details>}
+                  {proposal.reason && <p className="failure-line">{proposal.reason}</p>}
+                  {proposal.rationale && <p className="finding-rationale">{proposal.rationale}</p>}
+                  {proposal.status === 'ready' && <div className="change-columns"><div><span>BEFORE</span><pre>{proposal.originalText}</pre></div><div><span>PROPOSED</span><pre>{proposal.replacementText}</pre></div></div>}
+                  {proposal.status === 'rejected' && proposal.replacementText && <details className="evidence-details">
+                    <summary>Show rejected rewrites ({proposal.attempts} attempt{proposal.attempts === 1 ? '' : 's'}) · not applicable</summary>
+                    {(proposal.attemptHistory ?? [{ attempt: proposal.attempts, replacementText: proposal.replacementText, failedGates: [] }]).map((attempt) => (
+                      <div className="rejected-attempt" key={attempt.attempt}>
+                        <p className="local-note">Attempt {attempt.attempt}{attempt.failedGates.length ? ` · failed: ${attempt.failedGates.join(', ')}` : ''}</p>
+                        <div className="change-columns"><div><span>BEFORE</span><pre>{proposal.originalText}</pre></div><div><span>REJECTED</span><pre>{attempt.replacementText}</pre></div></div>
+                      </div>
+                    ))}
+                  </details>}
+                  <GateList gates={proposal.gates} />
+                  {proposal.warningAcknowledgementRequired && <label className="warning-ack"><input type="checkbox" checked={acknowledgedWarnings.has(proposal.id)} onChange={() => toggleWarning(proposal.id)} disabled={!selectedProposals.has(proposal.id)} />
+                    <span className="checkmark" aria-hidden="true" /><span>I acknowledge this proposal has a not-checked safety gate.</span></label>}
+                  {proposal.baseline && <details className="baseline-details" open={proposal.baseline.status === 'passed'}><summary>Characterisation baseline · {proposal.baseline.status}{proposal.baseline.stableCases ? ` · ${proposal.baseline.stableCases} stable cases` : ''}</summary><BaselineTable proposal={proposal} /></details>}
+                  {proposal.residualFindings?.length > 0 && <details className="evidence-details" open={proposal.status !== 'ready'}>
+                    <summary>{proposal.residualFindings.length} finding(s) remain after the proposed change</summary>
+                    <ul className="residual-list">{proposal.residualFindings.map((finding, findingIndex) => (
+                      <li key={`${finding.ruleId}-${finding.line}-${findingIndex}`}><strong>{finding.severity} · {finding.ruleId}</strong>{finding.line ? ` · line ${finding.line}` : ''} — {finding.message}</li>
+                    ))}</ul>
+                  </details>}
                 </article>
               ))}
             </div>
+            <div className="consent-footer"><span>{selectedProposals.size} proposals · {selectedUpdates.size} dependency updates selected</span>
+              <button className="button button-primary" type="button" onClick={() => applySelected()} disabled={!canApply || busy !== ''}>
+                {busy === 'apply' ? <><Spinner />Rechecking combined baselines...</> : busy === 'update-prepare' ? <><Spinner />Resolving dependency update...</> : selectedUpdates.size ? 'Review update diff and build' : 'Apply approved proposals'}
+              </button></div>
           </section>
         )}
 
         {stage === 'build' && review && updatePreview && (
           <section className="build-review" aria-labelledby="build-review-title">
-            <div className="review-heading">
-              <div>
-                <p className="eyebrow">04 / UPDATE DIFF AND BUILD</p>
-                <h2 id="build-review-title">Review the staged update</h2>
-                <p className="review-subtitle">{updatePreview.packageDiff.length} direct packages · {updatePreview.lockChanges.length} lock entries changed · {updatePreview.sourceFindings} approved source findings</p>
-              </div>
-              <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject update</button>
-            </div>
-
-            <section className="update-diff-block">
-              <p className="eyebrow">DIRECT PACKAGE CHANGES</p>
-              {updatePreview.packageDiff.map((update) => (
-                <div className="update-diff-row" key={update.name}>
-                  <strong>{update.name}</strong>
-                  <span>{update.fromSpec} · locked {update.fromVersion}</span>
-                  <span>→ {update.version}</span>
-                </div>
-              ))}
-            </section>
-
-            {selected.size > 0 && (
-              <details className="update-diff-block" open>
-                <summary>Approved source changes ({selected.size})</summary>
-                {review.findings.filter((finding) => selected.has(finding.id)).map((finding) => (
-                  <div className="update-source-change" key={finding.id}>
-                    <strong>{finding.path} · {finding.symbol}</strong>
-                    <div className="change-columns">
-                      <div><span>BEFORE</span><pre>{finding.originalText}</pre></div>
-                      <div><span>PROPOSED</span><pre>{finding.replacementText}</pre></div>
-                    </div>
-                  </div>
-                ))}
-              </details>
-            )}
-
-            <details className="update-diff-block" open>
-              <summary>Lockfile changes ({updatePreview.lockChanges.length})</summary>
-              <div className="update-lock-list">
-                {updatePreview.lockChanges.map((entry) => (
-                  <div className="update-diff-row" key={entry.path}>
-                    <strong>{entry.name}</strong>
-                    <span>{entry.from || 'new'}</span>
-                    <span>→ {entry.to || 'removed'}</span>
-                  </div>
-                ))}
-              </div>
-              {updatePreview.omittedLockChanges > 0 && <p className="evidence-note">{updatePreview.omittedLockChanges} additional lock entries changed and are included in the staged lockfile.</p>}
-            </details>
-
-            <section className="build-command-block">
-              <p className="eyebrow">EXECUTION AFTER APPROVAL</p>
-              <code>{updatePreview.build.install}</code>
-              <code>{updatePreview.build.command}</code>
-              <p>Lifecycle scripts and project tests are not run. The build command itself executes uploaded project code.</p>
-              <p className="disclosure-warning">This runs in a temporary copy with a sanitized environment, but the temporary directory is not an OS sandbox. Approve only code you trust.</p>
-              <label className="build-acknowledgement">
-                <input type="checkbox" checked={buildAcknowledged} onChange={(event) => setBuildAcknowledged(event.target.checked)} disabled={Boolean(buildResult)} />
-                <span className="checkmark" aria-hidden="true" />
-                <span>I approve installing the staged dependencies and running the disclosed build command.</span>
-              </label>
-            </section>
-
-            {buildResult && (
-              <div className={`build-result ${buildResult.status === 'passed' ? 'build-passed' : 'build-failed'}`} role="status">
-                <strong>Build {buildResult.status}</strong>
-                <span>{buildResult.stage}: {buildResult.reason || 'command completed'}</span>
-                {buildResult.output && <pre>{buildResult.output}</pre>}
-                <p>The uploaded folder remains unchanged. Project tests were not run.</p>
-              </div>
-            )}
-
-            <div className="consent-footer">
-              <span>Only a successful build makes these changes available for download.</span>
-              <button className="button button-primary" type="button" onClick={runStagedBuild}
-                disabled={!buildAcknowledged || busy !== '' || Boolean(buildResult)}>
-                {busy === 'build' ? 'Installing and building…' : 'Run build and stage download'}
-              </button>
-            </div>
+            <div className="review-heading"><div><p className="eyebrow">SECOND CHECKPOINT · BUILD</p><h2 id="build-review-title">Review the staged update</h2>
+              <p className="review-subtitle">{updatePreview.packageDiff.length} packages · {updatePreview.lockChanges.length} lock entries · {updatePreview.sourceFindings} source proposals</p></div>
+              <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject staged update</button></div>
+            <section className="update-diff-block"><p className="eyebrow">DIRECT PACKAGE CHANGES</p>{updatePreview.packageDiff.map((item) => <div className="update-diff-row" key={item.name}><strong>{item.name}</strong><span>{item.fromVersion} · {item.fromSpec}</span><span>to {item.version}</span></div>)}</section>
+            <details className="update-diff-block" open><summary>Lockfile changes ({updatePreview.lockChanges.length + updatePreview.omittedLockChanges})</summary>
+              <div className="update-lock-list">{updatePreview.lockChanges.map((item) => <div className="update-diff-row" key={item.path}><strong>{item.name}</strong><span>{item.from || 'new'}</span><span>to {item.to || 'removed'}</span></div>)}</div>
+              {updatePreview.omittedLockChanges > 0 && <p className="evidence-note">{updatePreview.omittedLockChanges} more entries are included in the staged lockfile.</p>}</details>
+            <section className="build-command-block"><p className="eyebrow">EXECUTION DISCLOSURE</p><code>{updatePreview.build.install}</code><code>{updatePreview.build.command}</code>
+              <p>After a passing build, every stable characterisation baseline replays against the upgraded copy. Lifecycle scripts and project tests are not run. The build command executes uploaded code in a temporary copy, not an OS sandbox.</p>
+              <label className="build-acknowledgement"><input type="checkbox" checked={buildAcknowledged} onChange={(event) => setBuildAcknowledged(event.target.checked)} disabled={Boolean(buildResult)} />
+                <span className="checkmark" aria-hidden="true" /><span>I approve the displayed install and build command.</span></label></section>
+            {buildResult && <div className="build-result build-failed" role="status"><strong>Build {buildResult.status}</strong><span>{buildResult.stage}: {buildResult.reason}</span><pre>{buildResult.output}</pre></div>}
+            <div className="consent-footer"><span>Only a successful build makes dependency changes available for download.</span><button className="button button-primary" type="button" onClick={runStagedBuild} disabled={!buildAcknowledged || busy !== '' || Boolean(buildResult)}>{busy === 'build' ? <><Spinner />Installing, building, and re-checking...</> : 'Run approved build'}</button></div>
           </section>
         )}
 
         {stage === 'export' && review && applied && (
-          <section className="export-panel" aria-labelledby="export-title">
-            <p className="eyebrow">03 / TRANSFORMATION READY</p>
-            <h2 id="export-title">Your approved copy is ready.</h2>
-            <p className="export-copy">{applied.packages ? `${applied.packages} dependency updates and ${applied.findings} source changes staged; build passed.` : `${applied.findings} approved changes across ${applied.files} files.`} The uploaded folder was not modified. Tests were not run.</p>
-            <div className="export-actions">
-              <a className="button button-primary download-button" href={`/api/sessions/${review.sessionId}/download`}>
-                Download transformed ZIP <span aria-hidden="true">↓</span>
-              </a>
-              <button className="button button-quiet" type="button" onClick={resetReview}>Review another folder</button>
-            </div>
+          <section className="export-panel" aria-labelledby="export-title"><p className="eyebrow">TRANSFORMATION READY</p><h2 id="export-title">Approved copy is ready.</h2>
+            <p className="export-copy">{applied.proposals ?? applied.findings ?? 0} source proposals · {applied.packages ?? 0} package updates · {applied.files ?? 0} staged files · {applied.testFiles ?? 0} characterisation test files. The uploaded folder was not modified; project tests were not run.</p>
+            <div className="export-actions"><a className="button button-primary download-button" href={`/api/sessions/${review.sessionId}/download`}>Download transformed ZIP <span aria-hidden="true">↓</span></a>
+              <button className="button button-quiet" type="button" onClick={resetReview}>Assess another folder</button></div>
             {applied.report && <ChangeReport report={applied.report} />}
           </section>
         )}
       </main>
-
-      {comparedPair && <OverlapComparison pair={comparedPair} selected={selected} onKeep={keepComparedProposal} onClose={() => setComparedPair(null)} />}
-
-      <footer className="footer-bar">
-        <span>LOCAL DEMO</span>
-        <span>Model suggestions are unverified until reviewed.</span>
-      </footer>
+      {ackPrompt && <AcknowledgeDialog proposals={ackPrompt} onCancel={() => setAckPrompt(null)} onConfirm={() => {
+        const next = new Set([...acknowledgedWarnings, ...ackPrompt.map((proposal) => proposal.id)]);
+        setAcknowledgedWarnings(next);
+        setAckPrompt(null);
+        applySelected(next);
+      }} />}
+      <footer className="footer-bar"><span>LOCAL ASSESSMENT · NODE 24</span><span>Model output is a proposal; gates and review determine what is staged.</span></footer>
     </div>
   );
 }

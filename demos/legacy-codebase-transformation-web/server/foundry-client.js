@@ -1,9 +1,12 @@
 'use strict';
 
-const { FINDING_CATEGORIES, MAX_FINDINGS_PER_REQUEST } = require('../../legacy-codebase-transformation/extension/src/scan-pipeline');
-
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const REQUEST_TIMEOUT_MS = 60000;
+const FINDING_CATEGORIES = Object.freeze([
+  'redundant-control-flow', 'repeated-local-expression', 'complex-function-simplification',
+  'code-duplication', 'excessive-complexity', 'unnecessary-abstraction', 'unclear-intent',
+  'obsolete-pattern', 'fragile-structure', 'other-technical-debt'
+]);
 
 const FINDING_SCHEMA = Object.freeze({
   type: 'object',
@@ -41,9 +44,10 @@ const FINDING_SCHEMA = Object.freeze({
 function getFoundryConfiguration(env = process.env) {
   const apiKey = env.FOUNDRY_API_KEY;
   const model = env.FOUNDRY_MODEL || 'gpt-4.1-mini';
+  const rewriteModel = env.FOUNDRY_REWRITE_MODEL || model;
   const endpoint = env.FOUNDRY_ENDPOINT;
-  if (typeof apiKey !== 'string' || !apiKey.trim() || /[\r\n]/.test(apiKey) ||
-      typeof model !== 'string' || !model.trim() || model.length > 200 || /[\r\n]/.test(model)) {
+  const validModel = (value) => typeof value === 'string' && value.trim() && value.length <= 200 && !/[\r\n]/.test(value);
+  if (typeof apiKey !== 'string' || !apiKey.trim() || /[\r\n]/.test(apiKey) || !validModel(model) || !validModel(rewriteModel)) {
     throw new Error('Set FOUNDRY_API_KEY, FOUNDRY_ENDPOINT, and FOUNDRY_MODEL in the server environment.');
   }
 
@@ -55,7 +59,7 @@ function getFoundryConfiguration(env = process.env) {
     throw new Error('FOUNDRY_ENDPOINT must be a canonical HTTPS Azure OpenAI or Foundry resource endpoint.');
   }
 
-  return { apiKey, model: model.trim(), url: `${parsed.origin}/openai/v1/chat/completions` };
+  return { apiKey, model: model.trim(), rewriteModel: rewriteModel.trim(), url: `${parsed.origin}/openai/v1/chat/completions` };
 }
 
 async function readBoundedJson(response) {
@@ -83,7 +87,10 @@ async function readBoundedJson(response) {
   return JSON.parse(text);
 }
 
-async function requestFindings(prompt, options = {}) {
+async function requestStructured(prompt, { schemaName, schema, ...options } = {}) {
+  if (typeof schemaName !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(schemaName) || !schema || typeof schema !== 'object') {
+    throw new TypeError('A valid structured-output schema name and schema are required.');
+  }
   const config = options.config ?? getFoundryConfiguration(options.env);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== 'function') throw new Error('This Node.js runtime does not provide fetch.');
@@ -97,12 +104,12 @@ async function requestFindings(prompt, options = {}) {
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json', 'api-key': config.apiKey },
       body: JSON.stringify({
-        model: config.model,
+        model: options.purpose === 'rewrite' ? (config.rewriteModel ?? config.model) : config.model,
         temperature: 0,
         messages: [{ role: 'user', content: prompt }],
         response_format: {
           type: 'json_schema',
-          json_schema: { name: 'codebase_findings', strict: true, schema: FINDING_SCHEMA }
+          json_schema: { name: schemaName, strict: true, schema }
         }
       })
     });
@@ -126,4 +133,8 @@ async function requestFindings(prompt, options = {}) {
   }
 }
 
-module.exports = { FINDING_SCHEMA, getFoundryConfiguration, requestFindings };
+function requestFindings(prompt, options = {}) {
+  return requestStructured(prompt, { schemaName: 'codebase_findings', schema: FINDING_SCHEMA, ...options });
+}
+
+module.exports = { FINDING_SCHEMA, getFoundryConfiguration, requestFindings, requestStructured };

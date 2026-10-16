@@ -1,18 +1,30 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { SOURCE_EXTENSIONS, chunkSourceFiles, hashSource, isExcludedPath } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
-const { MAX_FINDINGS_PER_REQUEST, MAX_MODEL_REQUESTS } = require('../../legacy-codebase-transformation/extension/src/scan-pipeline');
-const { scanPrompt, validateUploadedFinding, javaScriptReplacementFailure } = require('./analysis');
+const { assessProject } = require('./assess');
+const { parseSource } = require('./assess/parse');
+const { transformUnit } = require('./transform/agent');
+const { compareRewrite } = require('./characterise/harness');
+const { renderTestFile } = require('./characterise/export');
 const { assessNpmDependencies, inventoryNpmFiles } = require('./dependency-review');
 const { prepareDependencyBuild: resolveDependencyBuild, runApprovedBuild } = require('./dependency-build');
-const { getFoundryConfiguration, requestFindings } = require('./foundry-client');
+const { getFoundryConfiguration, requestStructured } = require('./foundry-client');
 
+const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.jsx']);
+const EXCLUDED_DIRECTORIES = new Set(['node_modules', 'dist', 'build', 'coverage', '.git', '.next', '.vite', '__characterisation__']);
 const MAX_UPLOAD_FILES = 500;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const sessions = new Map();
+
+function hashSource(content) {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+function isExcludedPath(relativePath) {
+  return relativePath.split('/').some((segment) => segment.startsWith('.') || EXCLUDED_DIRECTORIES.has(segment.toLowerCase()));
+}
 
 function appError(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
@@ -117,19 +129,27 @@ function sourceInventory(files) {
   return { sourceFiles, skippedFiles };
 }
 
+function readDebtConfig(files, rootName) {
+  const bytes = files.get(`${rootName}/debt.config.json`);
+  if (!bytes) return {};
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { throw appError('The uploaded debt.config.json is not valid UTF-8 JSON.'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw appError('The uploaded debt.config.json must contain a JSON object.');
+  return value;
+}
+
 function prepareUpload(manifest, uploadedFiles) {
   const uploaded = prepareUploadedFiles(manifest, uploadedFiles);
   const inventory = sourceInventory(uploaded.files);
-  const chunked = chunkSourceFiles(inventory.sourceFiles);
-  if (chunked.chunks.length > MAX_MODEL_REQUESTS) {
-    throw appError(`This demo limits a scan to ${MAX_MODEL_REQUESTS} Foundry requests. Select a smaller folder.` , 413);
-  }
   const dependencyInventory = inventoryNpmFiles(uploaded.files, uploaded.rootName);
   const rootManifest = dependencyInventory.rootManifest ?
     JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(uploaded.files.get(dependencyInventory.rootManifest))) : null;
   if (inventory.sourceFiles.length === 0 && dependencyInventory.documents.length === 0) {
     throw appError('No supported source files or npm manifests/lockfiles were found.');
   }
+  const debtConfig = readDebtConfig(uploaded.files, uploaded.rootName);
+  const assessment = assessProject(inventory.sourceFiles, debtConfig);
 
   const scanId = randomUUID();
   const sessionId = randomUUID();
@@ -139,23 +159,26 @@ function prepareUpload(manifest, uploadedFiles) {
     rootName: uploaded.rootName,
     files: uploaded.files,
     sourceFiles: inventory.sourceFiles,
-    chunks: chunked.chunks,
+    debtConfig,
+    assessment,
+    initialAssessment: assessment,
     dependencyInventory,
-    findings: [],
-    sourceFailures: [],
+    proposals: [],
     dependencyAssessment: null,
-    complete: false,
     applied: false,
-    analysisStarted: false,
+    transformStarted: false,
+    progress: { stage: 'assessment-complete', completed: 0, total: 0, unitId: null },
     createdAt: Date.now(),
     lastAccessed: Date.now(),
     summary: {
       filesUploaded: uploaded.files.size,
       sourceFiles: inventory.sourceFiles.length,
       bytesUploaded: uploaded.totalBytes,
-      projectedRequests: chunked.chunks.length,
       skippedFiles: inventory.skippedFiles,
-      skippedChunks: chunked.skippedFiles
+      rating: assessment.rating,
+      debtMinutes: assessment.debtMinutes,
+      findingCount: assessment.findingCount,
+      parseGaps: assessment.gaps.length
     }
   };
   pruneSessions();
@@ -168,11 +191,7 @@ function prepareUpload(manifest, uploadedFiles) {
     sessionId,
     scanId,
     summary: session.summary,
-    sourceDisclosure: {
-      files: [...new Set(chunked.chunks.map((chunk) => chunk.path))],
-      chunks: chunked.chunks.length,
-      bytes: chunked.chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.content, 'utf8'), 0)
-    },
+    assessment,
     dependencyPreview: {
       documents: dependencyInventory.documents,
       declarations: dependencyInventory.declarations,
@@ -180,10 +199,9 @@ function prepareUpload(manifest, uploadedFiles) {
       registryNames: dependencyInventory.lookup.registryNames,
       advisoryTuples: dependencyInventory.lookup.advisoryTuples,
       buildAvailable: dependencyInventory.buildAvailable,
-      buildScript: dependencyInventory.buildScript,
+      buildScript: typeof rootManifest?.scripts?.build === 'string' ? rootManifest.scripts.build : null,
       gaps: dependencyInventory.gaps,
       limits: dependencyInventory.limits,
-      buildScript: typeof rootManifest?.scripts?.build === 'string' ? rootManifest.scripts.build : null,
       destinations: [
         { endpoint: 'https://registry.npmjs.org/<encoded-package-name>', method: 'GET', payload: 'Displayed direct npm package names only.' },
         { endpoint: 'https://api.osv.dev/v1/query', method: 'POST', payload: 'Displayed exact npm package name and locked version tuples only.' }
@@ -192,111 +210,130 @@ function prepareUpload(manifest, uploadedFiles) {
   };
 }
 
-async function analyzePreparedUpload(sessionId, decisions, options = {}) {
+function getTransformProgress(sessionId) {
   const session = getSession(sessionId);
   if (!session) throw appError('This upload preview expired. Select the folder again.', 404);
-  if (session.analysisStarted) throw appError('This upload preview was already used. Select the folder again.');
-  if (!decisions || typeof decisions.sourceApproved !== 'boolean' || typeof decisions.dependencyApproved !== 'boolean') {
-    throw appError('Confirm source sharing and npm metadata sharing.');
+  return { ...session.progress };
+}
+
+function safeTransformFailure(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const safePrefixes = [
+    'Foundry returned HTTP ', 'Foundry refused ', 'Foundry request timed out',
+    'The Foundry response ', 'The Foundry request ', 'Could not complete the Foundry ',
+    'Set FOUNDRY_', 'Each characterisation ', 'Characterisation inputs ',
+    'Foundry must ', 'A valid structured-output ', 'The selected function '
+  ];
+  return safePrefixes.some((prefix) => message.startsWith(prefix)) ? message : 'Foundry or characterisation processing failed.';
+}
+
+async function transformUnits(sessionId, input, options = {}) {
+  const session = getSession(sessionId);
+  if (!session) throw appError('This upload preview expired. Select the folder again.', 404);
+  if (session.transformStarted) throw appError('This upload preview was already used. Select the folder again.');
+  if (!input || input.approved !== true || !Array.isArray(input.unitIds) || input.unitIds.length === 0 ||
+      input.unitIds.length > 5 || new Set(input.unitIds).size !== input.unitIds.length) {
+    throw appError('Approve and select between one and five unique transformation units.');
   }
-  const findings = [];
-  const sourceFailures = [];
+  const unitsById = new Map(session.assessment.units.map((unit) => [unit.id, unit]));
+  const selected = [];
+  const selectedIds = new Set();
+  for (const id of input.unitIds) {
+    const unit = unitsById.get(id);
+    if (!unit) throw appError('A selected transformation unit is stale. Refresh the assessment.');
+    if (unit.kind === 'file') {
+      const functions = session.assessment.units.filter((candidate) => candidate.kind === 'function' && candidate.path === unit.path);
+      if (!functions.length) throw appError('The selected long-file finding has no function units to transform.');
+      for (const candidate of functions) if (!selectedIds.has(candidate.id)) { selected.push(candidate); selectedIds.add(candidate.id); }
+    } else if (unit.kind === 'function' || unit.kind === 'statement') {
+      if (!selectedIds.has(unit.id)) { selected.push(unit); selectedIds.add(unit.id); }
+    } else throw appError('The selected unit cannot be transformed.');
+  }
+  if (selected.length > 5) throw appError('Selecting the long-file finding expands beyond the five-unit limit. Select fewer units.');
+  if (input.findingIds !== undefined) {
+    if (!Array.isArray(input.findingIds) || input.findingIds.some((id) => typeof id !== 'string')) throw appError('Approved findings must be a list of finding IDs.');
+    const approved = new Set(input.findingIds);
+    for (const [index, unit] of selected.entries()) {
+      if (!input.unitIds.includes(unit.id)) continue;
+      const findings = unit.findings.filter((item) => approved.has(item.id));
+      if (!findings.length) throw appError(`Approve at least one finding for ${unit.name}, or deselect it.`);
+      selected[index] = { ...unit, findings };
+    }
+  }
+  const config = options.config ?? getFoundryConfiguration(options.env);
+  session.transformStarted = true;
+  session.progress = { stage: 'dependency-assessment', completed: 0, total: selected.length, unitId: null };
+
   const dependencyIdsAvailable = session.dependencyInventory.lookup.registryNames.length > 0 ||
     session.dependencyInventory.lookup.advisoryTuples.length > 0;
-  if (session.chunks.length > 0 && dependencyIdsAvailable &&
-      decisions.sourceApproved !== decisions.dependencyApproved) {
-    throw appError('This codebase has source and npm dependencies; approve both analyses together or decline both.');
-  }
-  session.analysisStarted = true;
-  let sourceStatus = session.chunks.length ? 'not-approved' : 'not-applicable';
-  let requests = 0;
-  if (decisions.sourceApproved && session.chunks.length) {
-    const config = options.config ?? getFoundryConfiguration(options.env);
-    sourceStatus = 'completed';
-    const requestModel = options.requestFindings ?? requestFindings;
-    for (const [index, rawChunk] of session.chunks.entries()) {
-      const chunk = { ...rawChunk, scanId: session.scanId };
-      try {
-        const prompt = scanPrompt(chunk, MAX_FINDINGS_PER_REQUEST);
-        const payload = await requestModel(prompt, {
-          config, fetchImpl: options.fetchImpl
-        });
-        let validated = validateUploadedFinding(payload, chunk);
-        requests += 1;
-
-        if (validated.rejections.some((reason) => reason.includes('Text validation failed:'))) {
-          try {
-            requests += 1;
-            const feedback = validated.rejections.filter((reason) => reason.includes('Text validation failed:')).join(' ');
-            const retryPayload = await requestModel(`${prompt}\n\nValidation feedback: ${feedback} Reinspect this source chunk. For every finding, originalText must be an exact, nonempty source span and replacementText must be a different, nonempty replacement. Omit a finding if you cannot provide both exactly.`, {
-              config, fetchImpl: options.fetchImpl
-            });
-            const retryValidation = validateUploadedFinding(retryPayload, chunk);
-            const seen = new Set();
-            const retryFindings = [...validated.findings, ...retryValidation.findings].filter((finding) => {
-              const key = JSON.stringify([finding.path, finding.range, finding.originalText, finding.replacementText]);
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-            validated = { findings: retryFindings, rejections: retryValidation.rejections };
-          } catch (error) {
-            sourceFailures.push({ path: chunk.path, startLine: chunk.startLine,
-              reason: error.statusCode ? error.message : 'The model retry failed or did not match the finding contract.' });
-          }
-        }
-        if (validated.rejections.length) {
-          sourceFailures.push({ path: chunk.path, startLine: chunk.startLine, reason: validated.rejections.join(' ') });
-        }
-        findings.push(...validated.findings);
-      } catch (error) {
-        sourceFailures.push({ path: chunk.path, startLine: chunk.startLine,
-          reason: error.statusCode ? error.message : 'The model response failed or did not match the finding contract.' });
-        requests += 1;
-      }
-      options.onProgress?.({ attempted: index + 1, total: session.chunks.length });
-    }
-    if (sourceFailures.length) sourceStatus = 'incomplete';
-  }
-
   let dependencyAssessment;
-  if (decisions.dependencyApproved && dependencyIdsAvailable) {
+  if (input.checkDependencies === true && dependencyIdsAvailable) {
     dependencyAssessment = await assessNpmDependencies(session.dependencyInventory, { fetchImpl: options.metadataFetchImpl });
   } else {
     dependencyAssessment = {
-      status: dependencyIdsAvailable ? 'not-approved' : session.dependencyInventory.documents.length ? 'not-applicable' : 'not-found',
+      status: input.checkDependencies !== true ? 'skipped' : session.dependencyInventory.documents.length ? 'not-applicable' : 'not-found',
       fingerprint: session.dependencyInventory.fingerprint,
-      requests: 0,
-      registry: [],
-      advisories: [],
-      gaps: session.dependencyInventory.gaps,
-      startedAt: null,
-      completedAt: null
+      requests: 0, registry: [], advisories: [], gaps: session.dependencyInventory.gaps,
+      startedAt: null, completedAt: null
     };
   }
 
-  session.findings = findings;
-  session.sourceFailures = sourceFailures;
   session.dependencyAssessment = dependencyAssessment;
-  session.sourceStatus = sourceStatus;
-  session.complete = sourceStatus === 'completed';
+  session.proposals = [];
+  for (const [index, unit] of selected.entries()) {
+    const sourceFile = session.sourceFiles.find((item) => item.path === unit.path);
+    session.progress = { stage: 'unit-start', completed: index, total: selected.length, unitId: unit.id };
+    options.onProgress?.({ ...session.progress });
+    const targetFindings = unit.findings.map(({ id, ruleId, severity, line, column, message }) => ({ id, ruleId, severity, line, column, message }));
+    try {
+      const proposal = await (options.transformUnit ?? transformUnit)({
+        unit, source: sourceFile.content, sourceFiles: session.sourceFiles, files: session.files,
+        rootName: session.rootName, assessment: session.assessment, config: session.debtConfig
+      }, {
+        requestStructured: options.requestStructured,
+        foundryOptions: { config, fetchImpl: options.fetchImpl },
+        characterisationOptions: { runCommand: options.runCharacterisationCommand },
+        onProgress: (progress) => {
+          session.progress = { ...progress, completed: index, total: selected.length, unitId: unit.id };
+          options.onProgress?.({ ...session.progress });
+        }
+      });
+      const testPreview = proposal.baseline?.status === 'passed'
+        ? { path: testArtifactPath(session.rootName, unit), content: renderTestFile({ unit, rootName: session.rootName, baseline: proposal.baseline }) }
+        : null;
+      session.proposals.push({ ...proposal, id: randomUUID(), unit, testPreview, targetFindings });
+    } catch (error) {
+      session.proposals.push({ id: randomUUID(), unitId: unit.id, path: unit.path, name: unit.name,
+        originalText: unit.originalText, status: 'failed', attempts: 0, gates: [], baseline: { status: 'not-checked' },
+        targetFindings, reason: safeTransformFailure(error) });
+    }
+    session.progress = { stage: 'unit-complete', completed: index + 1, total: selected.length, unitId: unit.id };
+    options.onProgress?.({ ...session.progress });
+  }
+
+  session.complete = true;
   session.summary = {
     ...session.summary,
-    requests,
-    sourceStatus,
+    transformedUnits: selected.length,
+    completedProposals: session.proposals.filter((proposal) => proposal.status === 'ready').length,
+    rejectedProposals: session.proposals.filter((proposal) => proposal.status !== 'ready').length,
     dependencyRequests: dependencyAssessment.requests,
     directPackages: session.dependencyInventory.declarations.length,
     lockedPackages: session.dependencyInventory.occurrences.length
   };
+  session.progress = { stage: 'complete', completed: selected.length, total: selected.length, unitId: null };
   session.lastAccessed = Date.now();
   return {
     sessionId: session.id,
     scanId: session.scanId,
     complete: session.complete,
-    sourceStatus,
-    sourceFailures,
     summary: session.summary,
-    findings,
+    proposals: session.proposals.map(({ unit, ...proposal }) => proposal),
+    sourceDisclosure: {
+      units: selected.map(({ id, path: unitPath, name, originalText }) => ({ id, path: unitPath, name,
+        bytes: Buffer.byteLength(originalText, 'utf8') })),
+      bytes: selected.reduce((total, unit) => total + Buffer.byteLength(unit.originalText, 'utf8'), 0)
+    },
     dependencyAssessment: {
       ...dependencyAssessment,
       inventory: session.dependencyInventory
@@ -304,96 +341,142 @@ async function analyzePreparedUpload(sessionId, decisions, options = {}) {
   };
 }
 
-function prepareApprovedChanges(session, approvedFindingIds, allowEmpty = false) {
-  if (!Array.isArray(approvedFindingIds) || (!allowEmpty && approvedFindingIds.length === 0) ||
-      approvedFindingIds.length > session.findings.length || new Set(approvedFindingIds).size !== approvedFindingIds.length) {
-    throw appError('Select unique findings to approve.');
+function testArtifactPath(rootName, unit) {
+  const relative = path.posix.relative(rootName, unit.path).replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9._/-]/g, '_');
+  const symbol = unit.name.replace(/[^A-Za-z0-9._-]/g, '_');
+  return `${rootName}/__characterisation__/${relative.replaceAll('/', '.')}.${symbol}.test.js`;
+}
+
+async function prepareApprovedChanges(session, proposalIds, acknowledgedWarningIds = [], allowEmpty = false, options = {}) {
+  if (!Array.isArray(proposalIds) || (!allowEmpty && proposalIds.length === 0) ||
+      proposalIds.length > session.proposals.length || new Set(proposalIds).size !== proposalIds.length ||
+      !Array.isArray(acknowledgedWarningIds) || new Set(acknowledgedWarningIds).size !== acknowledgedWarningIds.length) {
+    throw appError('Select unique proposals and warning acknowledgements.');
   }
-  const findingById = new Map(session.findings.map((finding) => [finding.id, finding]));
-  const selected = approvedFindingIds.map((id) => findingById.get(id));
-  if (selected.some((finding) => !finding)) throw appError('The approval included an unknown finding. Refresh the review.');
+  const byId = new Map(session.proposals.map((proposal) => [proposal.id, proposal]));
+  const selected = proposalIds.map((id) => byId.get(id));
+  if (selected.some((proposal) => !proposal)) throw appError('The approval included an unknown proposal. Refresh the review.');
+  for (const proposal of selected) {
+    if (proposal.status !== 'ready') throw appError('Only proposals that passed the static gates can be applied.');
+    const failedGate = proposal.gates?.find((item) => item.status === 'fail');
+    if (failedGate) throw appError('A proposal with a failed gate cannot be applied.');
+    if (proposal.warningAcknowledgementRequired && !acknowledgedWarningIds.includes(proposal.id)) {
+      throw appError('Acknowledge every not-checked proposal before applying it.');
+    }
+  }
+  if (acknowledgedWarningIds.some((id) => !selected.some((proposal) => proposal.id === id))) {
+    throw appError('A warning acknowledgement does not match a selected proposal.');
+  }
 
   const changesByPath = new Map();
-  for (const finding of selected) {
-    const originalBytes = session.files.get(finding.path);
+  for (const proposal of selected) {
+    const unit = proposal.unit;
+    const originalBytes = session.files.get(proposal.path);
     if (!originalBytes) throw appError('A reviewed source file is missing. Upload the folder again.');
     const originalText = new TextDecoder('utf-8', { fatal: true }).decode(originalBytes);
-    if (hashSource(originalText) !== finding.sourceHash) throw appError('A reviewed source file changed. Upload the folder again.');
-    const start = offsetAt(originalText, finding.range.startLine, finding.range.startCharacter);
-    const end = offsetAt(originalText, finding.range.endLine, finding.range.endCharacter);
-    if (start === null || end === null || end <= start || originalText.slice(start, end) !== finding.originalText) {
+    if (hashSource(originalText) !== unit.sourceHash) throw appError('A reviewed source file changed. Upload the folder again.');
+    if (unit.start < 0 || unit.end <= unit.start || originalText.slice(unit.start, unit.end) !== proposal.originalText) {
       throw appError('A proposed source span no longer matches. Nothing was applied.');
     }
-    const changes = changesByPath.get(finding.path) ?? [];
-    changes.push({ start, end, replacementText: finding.replacementText });
-    changesByPath.set(finding.path, changes);
+    const changes = changesByPath.get(proposal.path) ?? [];
+    changes.push({ start: unit.start, end: unit.end, replacementText: proposal.replacementText });
+    changesByPath.set(proposal.path, changes);
   }
 
   const updatedFiles = new Map();
   for (const [relativePath, changes] of changesByPath) {
     changes.sort((left, right) => left.start - right.start);
     for (let index = 1; index < changes.length; index += 1) {
-      if (changes[index].start < changes[index - 1].end) throw appError('Selected changes overlap. Choose a non-overlapping set.');
+      if (changes[index].start < changes[index - 1].end) throw appError('Selected proposals overlap. Choose a non-overlapping set.');
     }
     const originalText = new TextDecoder('utf-8', { fatal: true }).decode(session.files.get(relativePath));
     let updatedText = originalText;
     for (const change of [...changes].reverse()) {
       updatedText = `${updatedText.slice(0, change.start)}${change.replacementText}${updatedText.slice(change.end)}`;
     }
-    const syntaxFailure = javaScriptReplacementFailure(relativePath, originalText, updatedText);
-    if (syntaxFailure) throw appError(`${relativePath}: ${syntaxFailure} Nothing was applied.`);
+    const parsed = parseSource(updatedText, relativePath);
+    if (!parsed.ast) throw appError(`${relativePath}: The combined source changes do not parse. Nothing was applied.`);
     updatedFiles.set(relativePath, Buffer.from(updatedText, 'utf8'));
   }
 
   const stagedFiles = new Map(session.files);
   for (const [relativePath, bytes] of updatedFiles) stagedFiles.set(relativePath, bytes);
-  return { files: stagedFiles, selected, updatedFiles };
+  const compare = options.compareRewrite ?? compareRewrite;
+  const testFiles = new Map();
+  for (const proposal of selected) {
+    if (proposal.baseline?.status !== 'passed') continue;
+    const combined = await compare(stagedFiles, session.rootName, proposal.unit, proposal.baseline, {
+      runCommand: options.runCharacterisationCommand
+    });
+    if (combined.status !== 'passed') throw appError(`Combined selected changes did not preserve ${proposal.name} characterisation. Nothing was applied.`);
+    const testPath = testArtifactPath(session.rootName, proposal.unit);
+    if (testFiles.has(testPath)) throw appError('Characterisation test output paths collided. Nothing was applied.');
+    testFiles.set(testPath, Buffer.from(renderTestFile({ unit: proposal.unit, rootName: session.rootName, baseline: proposal.baseline }), 'utf8'));
+  }
+  for (const [testPath, bytes] of testFiles) stagedFiles.set(testPath, bytes);
+
+  const stagedSourceFiles = sourceInventory(stagedFiles).sourceFiles;
+  const afterAssessment = assessProject(stagedSourceFiles, session.debtConfig);
+  return { files: stagedFiles, selected, updatedFiles, testFiles, sourceFiles: stagedSourceFiles, afterAssessment };
 }
 
-function buildChangeReport(selected, { updates = [], lockChanges = [], omittedLockChanges = 0, build = null } = {}) {
+function characterisationTestPaths(files) {
+  return [...files.keys()].filter((key) => key.includes('/__characterisation__/') && key.endsWith('.test.js')).sort();
+}
+
+function buildChangeReport(selected, { beforeAssessment, afterAssessment, updates = [], lockChanges = [], omittedLockChanges = 0, build = null, testFiles = [] } = {}) {
   return {
-    sourceChanges: selected.map((finding) => ({
-      id: finding.id,
-      path: finding.path,
-      symbol: finding.symbol,
-      category: finding.category,
-      rationale: finding.rationale,
-      startLine: finding.range.startLine,
-      endLine: finding.range.endLine,
-      before: finding.originalText,
-      after: finding.replacementText
+    before: beforeAssessment ? { rating: beforeAssessment.rating, debtMinutes: beforeAssessment.debtMinutes, debtHours: beforeAssessment.debtHours } : null,
+    after: afterAssessment ? { rating: afterAssessment.rating, debtMinutes: afterAssessment.debtMinutes, debtHours: afterAssessment.debtHours } : null,
+    sourceChanges: selected.map((proposal) => ({
+      id: proposal.id,
+      path: proposal.path,
+      symbol: proposal.name,
+      category: [...new Set(proposal.unit.findings.map((item) => item.ruleId))].join(', '),
+      rationale: proposal.rationale,
+      startLine: proposal.unit.startLine,
+      endLine: proposal.unit.endLine,
+      before: proposal.originalText,
+      after: proposal.replacementText,
+      gates: proposal.gates,
+      baseline: proposal.baseline,
+      comparison: proposal.comparison,
+      residualFindings: proposal.residualFindings
     })),
     packageChanges: updates.map(({ name, fromVersion, version }) => ({ name, fromVersion, version })),
     lockChanges,
     omittedLockChanges,
     build,
-    tests: 'not run'
+    testFiles,
+    tests: selected.some((proposal) => proposal.baseline?.status === 'passed') ? 'characterisation tests exported; project tests not run' : 'not run'
   };
 }
 
-function applyApprovedFindings(sessionId, approvedFindingIds) {
+async function applyApprovedFindings(sessionId, proposalIds, acknowledgedWarningIds = [], options = {}) {
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
-  if (!['completed', 'incomplete'].includes(session.sourceStatus)) throw appError('Source analysis must be approved before applying findings.');
+  if (!session.complete) throw appError('Selected-unit transformation must complete before applying proposals.');
   if (session.applied) throw appError('This review has already been transformed.');
-  const prepared = prepareApprovedChanges(session, approvedFindingIds);
+  const prepared = await prepareApprovedChanges(session, proposalIds, acknowledgedWarningIds, false, options);
+  const beforeAssessment = session.assessment;
   session.files = prepared.files;
+  session.sourceFiles = prepared.sourceFiles;
+  session.assessment = prepared.afterAssessment;
   session.applied = true;
   session.lastAccessed = Date.now();
-  session.appliedSummary = { findings: prepared.selected.length, files: prepared.updatedFiles.size };
-  session.changeReport = buildChangeReport(prepared.selected);
+  session.appliedSummary = { proposals: prepared.selected.length, files: prepared.updatedFiles.size, testFiles: prepared.testFiles.size };
+  session.changeReport = buildChangeReport(prepared.selected, { beforeAssessment, afterAssessment: prepared.afterAssessment,
+    testFiles: characterisationTestPaths(session.files) });
   return { ...session.appliedSummary, report: session.changeReport };
 }
 
-async function prepareApprovedUpdate(sessionId, approvedFindingIds, selectedUpdateNames, options = {}) {
+async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdateNames, acknowledgedWarningIds = [], options = {}) {
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
   if (session.applied) throw appError('This review has already been transformed.');
   if (session.dependencyAssessment?.status !== 'completed') throw appError('Only a complete dependency assessment can proceed with updates.');
-  if (approvedFindingIds?.length > 0 && !['completed', 'incomplete'].includes(session.sourceStatus)) {
-    throw appError('Source analysis must be approved before applying findings.');
-  }
-  const source = prepareApprovedChanges(session, approvedFindingIds, true);
+  if (!session.complete) throw appError('Selected-unit transformation must complete before preparing dependency updates.');
+  const source = await prepareApprovedChanges(session, proposalIds, acknowledgedWarningIds, true, options);
   let prepared;
   try {
     prepared = await resolveDependencyBuild(session, selectedUpdateNames, {
@@ -407,6 +490,8 @@ async function prepareApprovedUpdate(sessionId, approvedFindingIds, selectedUpda
   if (prepared.status !== 'ready') throw appError(`Could not prepare the selected updates: ${prepared.reason ?? 'resolution failed'}.`);
   session.updatePreview = prepared.internalPreview;
   session.updatePreview.sourceChanges = source.selected;
+  session.updatePreview.sourceAssessmentBefore = session.initialAssessment;
+  session.updatePreview.sourceAssessmentAfter = source.afterAssessment;
   session.lastAccessed = Date.now();
   return {
     previewId: prepared.previewId,
@@ -416,6 +501,20 @@ async function prepareApprovedUpdate(sessionId, approvedFindingIds, selectedUpda
     sourceFindings: prepared.sourceFindings,
     build: prepared.build
   };
+}
+
+async function replayAfterUpdate(session, proposals, files, options = {}) {
+  const compare = options.compareRewrite ?? compareRewrite;
+  const results = [];
+  for (const proposal of proposals) {
+    if (proposal.baseline?.status !== 'passed') continue;
+    const comparison = await compare(files, session.rootName, proposal.unit, proposal.baseline, { runCommand: options.runCharacterisationCommand });
+    const cases = comparison.cases ?? [];
+    results.push({ name: proposal.name, status: comparison.status, reason: comparison.reason ?? null,
+      matched: cases.filter((item) => item.passed).length, total: cases.length });
+  }
+  const failed = results.filter((item) => item.status !== 'passed');
+  return { status: failed.length ? 'failed' : results.length ? 'passed' : 'not-run', results };
 }
 
 async function runApprovedUpdateBuild(sessionId, previewId, options = {}) {
@@ -429,19 +528,34 @@ async function runApprovedUpdateBuild(sessionId, previewId, options = {}) {
     session.lastAccessed = Date.now();
     return result;
   }
+  const characterisation = await replayAfterUpdate(session, preview.sourceChanges ?? [], result.files, options);
+  if (characterisation.status === 'failed') {
+    session.updatePreview = null;
+    session.lastAccessed = Date.now();
+    const drifted = characterisation.results.filter((item) => item.status !== 'passed');
+    return { status: 'failed', stage: 'characterisation',
+      reason: `Behaviour changed after the dependency update for ${drifted.map((item) => item.name).join(', ')}. Nothing was applied.`,
+      output: drifted.map((item) => `${item.name}: ${item.total ? `${item.matched} of ${item.total} cases matched` : item.reason ?? item.status}`).join('\n'),
+      characterisation };
+  }
   session.files = result.files;
+  session.sourceFiles = sourceInventory(session.files).sourceFiles;
+  session.assessment = assessProject(session.sourceFiles, session.debtConfig);
   session.updatePreview = null;
   session.applied = true;
   session.lastAccessed = Date.now();
   session.appliedSummary = { findings: preview.sourceFindings, files: result.updatedFiles,
-    packages: result.updates.length, buildStatus: result.status };
+    packages: result.updates.length, buildStatus: result.status, testFiles: characterisationTestPaths(session.files).length };
   session.changeReport = buildChangeReport(preview.sourceChanges ?? [], {
+    testFiles: characterisationTestPaths(session.files),
+    beforeAssessment: preview.sourceAssessmentBefore,
+    afterAssessment: session.assessment,
     updates: result.updates,
     lockChanges: preview.lockChanges,
     omittedLockChanges: preview.omittedLockChanges,
-    build: { status: result.status, command: 'npm --ignore-scripts run build', output: result.output }
+    build: { status: result.status, command: 'npm --ignore-scripts run build', output: result.output, characterisation }
   });
-  return { status: result.status, stage: result.stage, output: result.output, tests: result.tests,
+  return { status: result.status, stage: result.stage, output: result.output, tests: result.tests, characterisation,
     updates: result.updates.map(({ name, fromVersion, version }) => ({ name, fromVersion, version })),
     summary: session.appliedSummary, report: session.changeReport };
 }
@@ -449,13 +563,16 @@ async function runApprovedUpdateBuild(sessionId, previewId, options = {}) {
 module.exports = {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
-  analyzePreparedUpload,
   applyApprovedFindings,
   getSession,
+  getTransformProgress,
   normalizeUploadPath,
   prepareApprovedUpdate,
   prepareUpload,
   prepareUploadedFiles,
   removeSession,
+  replayAfterUpdate,
+  safeTransformFailure,
+  transformUnits,
   runApprovedUpdateBuild
 };

@@ -1,0 +1,17 @@
+{
+  "name": "invoice-desk-sample",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small invoice CLI for debt assessment and gated refactoring demos.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "build": "node scripts/build.js"
+  },
+  "dependencies": {
+    "lodash": "4.17.20",
+    "uuid": "3.4.0"
+  }
+}
