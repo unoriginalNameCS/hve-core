@@ -1,6 +1,6 @@
 ---
-title: Technical Debt Assessor Demo
-description: Run a local JavaScript debt assessment and approve selected Foundry-proposed refactors with static and characterisation gates.
+title: Legacy Code Transformation Demo
+description: Review JavaScript code locally and approve selected Foundry-proposed transformations with static and characterisation gates.
 ---
 
 ## Run The Demo
@@ -27,42 +27,72 @@ Open `http://127.0.0.1:5173`. The API status is available at `http://127.0.0.1:5
 
 ## Lifecycle
 
-The demo moves through five stages. Each stage hands a defined output to the next, and nothing leaves your machine or executes until you approve it.
+The demo moves through five stages. Each stage hands a defined output to the next. The page scrolls to the top whenever the workflow advances so each new stage opens at its heading and first controls.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[01 Choose project] --> B[02 Assess locally]
-  B -->|select up to 5 units<br/>+ one combined approval| C[03 Review proposals<br/>per-proposal characterisation]
-  C --> R[Apply<br/>combined characterisation re-check]
-  R --> D[04 Build check<br/>only when dependency updates are selected<br/>build + characterisation on upgraded copy]
-  D --> E[05 Export]
+  B --> C[03 Select up to 5 units<br/>and approve the combined review]
+  C --> D[Foundry proposes test inputs and rewrites]
+  D --> E[Static gates and per-proposal characterisation]
+  E --> F[Review proposals and approve selected changes]
+  F --> G[Combined characterisation re-check]
+  G --> H{Dependency update selected?}
+  H -- No --> X[05 Export source changes and report]
+  H -- Yes --> I[04 Validate with separate approval<br/>install, build, project tests, behaviour replay]
+  I --> J{Checks passed?}
+  J -- Yes --> X
+  J -- No, curated migration available --> K[Approve source migration request]
+  K --> L[Foundry proposes compatibility edits]
+  L --> M[Rebuild, retest, replay characterisation]
+  M --> N{All checks pass and migration accepted?}
+  N -- Yes --> X
+  J -- No migration available --> Y[Update is not staged]
+  N -- No --> Y
 ```
 
-Characterisation runs on every path: once per proposal against its rewrite, and again across all selected proposals in the combined staged copy before anything is applied. When you select a dependency update, it runs a third time against the upgraded copy after the build passes. Stage 04 is the only optional step. It runs when you select a dependency update and needs its own approval.
+The local assessment is deterministic and makes no network requests. After you approve the combined review, Foundry proposes changes. Optional npm Registry and OSV lookups run only when dependency review was selected. Characterisation runs once per proposal against its rewrite, then again across all selected proposals before they are applied.
+
+A selected dependency update adds a separate approval checkpoint and another replay against the upgraded copy after the build passes. If an upgrade check fails and a supported migration guide exists, the UI offers a separate approval to request compatibility edits. The migration is staged only after the edited copy passes its checks and you accept it.
 
 | Stage | Inputs | What happens | Outputs | Network or execution |
 |-------|--------|--------------|---------|----------------------|
 | 01 Choose project | A local project folder (up to 500 files, 25 MB) | The browser uploads supported files to the local Node server; `node_modules` and `dist` are excluded | An in-memory session holding the file bytes | None |
 | 02 Assess locally | Session files and optional `debt.config.json` | Babel parses each source file, measures every function, applies the rules, and scores the project | A–E rating, per-file scores, hotspots, findings with line and column, selectable units, coverage gaps, and a dependency inventory | None |
-| 03 Review proposals | Up to five selected units, the findings you approved in each, and your combined approval | For each function, Foundry generates five inputs, the original runs twice to capture a baseline, Foundry rewrites the unit for the approved findings only, static gates run, and the rewrite replays the baseline. npm Registry and OSV evidence loads for the declared packages | One proposal per unit (`ready`, `rejected`, or `failed`) with its targeted findings, gates, case tabs, residual findings, attempt history, a preview of the generated test file, and dependency update candidates | Foundry, npm Registry, OSV, `npm ci --ignore-scripts` in a temporary copy, and local function execution |
-| 04 Build check | Applied proposals, selected dependency updates, and your separate build approval | The server resolves the update, shows the `package.json` and lockfile diff, then runs `npm ci` and `npm run build` with scripts disabled in a temporary copy. After a passing build, every stable characterisation baseline replays against the upgraded copy; any difference blocks the update | Build status and output, per-function characterisation results, plus updated manifests when both pass | npm install, the project build script, and local function execution |
-| 05 Export | The staged session | The server packages the staged project | A ZIP with the transformed source, `__characterisation__/*.test.js` files, updated manifests, and `TECH-DEBT-REPORT.md` with the before and after ratings | None |
+| 03 Review proposals | Up to five selected units, approved findings, and combined approval | For each function, Foundry generates five inputs, the original runs twice for a stable baseline, Foundry proposes a rewrite, static gates run, and the rewrite replays the baseline. Optional dependency review retrieves npm Registry and OSV evidence; update candidates identify curated source migration support when available | One proposal per unit (`ready`, `rejected`, or `failed`), targeted findings, gates, cases, residual findings, attempt history, test preview, and optional dependency candidates | Foundry, optional npm Registry/OSV requests, and local function execution |
+| 04 Validate | Applied proposals, selected package updates, and separate build approval | Shows package and lockfile diffs and commands before approval, then runs `npm ci`, `npm run build`, and the project's `npm test` with lifecycle scripts disabled in temporary copies. Tests run on the original and upgraded copies; a test gates the update only if it passed originally. Stable characterisation baselines replay against the upgraded copy. If checks fail and a curated migration is supported, a separately approved Foundry proposal can edit importing source files; the migration is rebuilt, retested, replayed, and accepted only after all checks pass | Build, project-test, and characterisation outcomes; updated manifests; and any accepted source migration edits | npm install, project build/test scripts, optional Foundry migration, and local function execution |
+| 05 Export | The staged session | The server packages only the approved staged project | A ZIP with transformed source, `__characterisation__/*.test.js` files, updated manifests, and `CODE-TRANSFORMATION-REPORT.md` with source changes, dependency compatibility outcomes, and migration before/after edits | None |
 
-Source-only runs skip stage 04. The uploaded folder is never modified, and the workflow does not run your project's own tests. Sessions live in server memory, so restarting the dev server clears them.
+Source-only runs skip stage 04. The uploaded folder is never modified. Project tests run only in stage 04 after you approve the disclosed commands. Sessions live in server memory, so restarting the dev server clears them.
+
+### Dependency Upgrade Levels
+
+Each update candidate is labelled patch, minor, or major from its semantic version change. For `0.x` packages, a minor version change is labelled major because it may contain breaking changes. The Allowed update level selector defaults to Patch only; choose Up to minor or Up to major to opt in to riskier upgrades. The server accepts a package name and level, then resolves the version from registry evidence, so the browser cannot request an arbitrary version.
+
+### Curated Dependency Migration
+
+A major upgrade can change how a package is called. Migration is offered only when a curated guide exists for the upgrade and the build, project tests, or characterisation fails on the upgraded copy. The current guide covers `date-fns` 1.x to 2.0 or later.
+After a separate approval, the server sends Foundry the non-test source files that import the package, the curated notes, and the failure output. It accepts only complete edits to those listed files that parse with the original module format, then reruns install, build, project tests, and characterisation in a temporary copy, with one retry.
+Nothing is staged until you accept a migration that passed every check. Passing checks are evidence, not proof of compatibility.
+
+At stage 05, choose Open in VS Code beside Download transformed ZIP to save the approved project, generated tests, and report into a separate temporary folder and open that folder in a new VS Code window. The page displays the saved path.
+Repeated clicks reopen the same copy without overwriting your editor changes. The copy remains after resetting the review; remove it when you no longer need it. This action requires the demo server and VS Code on the same machine.
+Windows uses a standard user or system VS Code installation; other platforms require `code` on `PATH`. If opening fails, the ZIP download remains available.
 
 ## Step-By-Step Demo Guide
 
-This walkthrough uses the headline `samples/invoice-desk` project. It shows both a source refactor and a dependency upgrade.
+This walkthrough uses the headline `samples/invoice-desk` project. It shows source refactors and a breaking dependency upgrade that needs a source migration.
 
-1. Optionally confirm the sample works on its own: from `samples/invoice-desk`, run `npm.cmd ci` and `npm.cmd start`. The CLI prints two invoice summaries.
-2. Start the assessor with `npm.cmd run dev` from this folder and open `http://127.0.0.1:5173`. The header shows the configured model, or `Foundry not configured`.
-3. Choose Select folder, pick `samples/invoice-desk`, then choose Run local assessment.
-4. Review the dashboard. The project rates D. The hotspots list `calculateDiscount` (nesting, complexity, magic numbers, a TODO), `buildInvoiceLines` (long function, unclear names), `formatLine` (seven parameters and the vague name `val`), and a top-level statement with `var`, `==`, and a magic number. Select a hotspot to open its local detail:
+1. Optionally confirm the sample works on its own: from `samples/invoice-desk`, run `npm.cmd ci` and `npm.cmd start`. The CLI prints two invoice summaries with status labels.
+2. Start the transformer with `npm.cmd run dev` from this folder and open `http://127.0.0.1:5173`. The header shows the configured model, or `Foundry not configured`.
+3. Choose Select folder, pick `samples/invoice-desk`, then choose Run assessment.
+4. Review the dashboard. The project rates D. The hotspots list `calculateDiscount` (nesting, complexity, magic numbers, a TODO), `buildInvoiceLines` (long function, unclear names), `formatLine` (seven parameters and the vague name `val`), `formatInvoiceStatus` (a six-way status-to-label branch chain), and a top-level statement with `var`, `==`, and a magic number. Select a hotspot to open its local detail:
    * Each finding shows its position as `Line N:Col` for an exact token, or `Line N` for whole-function metrics, which point at the function's first line.
    * The source preview has line numbers. Lines with approved findings are highlighted red, lines with only unapproved findings are grey, and the badge counts the findings on that line.
    * Choose a finding's position to scroll the source to that line, or choose a flagged line to highlight its findings in the list.
-5. Select those four units. Ticking a unit approves all of its findings. Use each finding's checkbox to drop any you do not want changed, or Select all and Clear all for the whole unit; clearing every finding deselects the unit. Only approved findings go to Foundry and the gates; unapproved findings stay as they are. The approval band shows the approved finding count, the exact source spans sent to Foundry, the package names and versions sent to npm and OSV, and that selected functions will execute locally.
-6. Tick Also check npm dependencies if you want the dependency upgrade in this run. Leave it unticked for a source-only run: no npm Registry or OSV lookups happen and the dependency update and build check are skipped. Then approve once. While assessment or transformation runs, a spinner shows that work is in progress. Transformation also shows the current unit and step, such as baseline capture or rewrite, with a completed-unit count.
+5. Select those five units. Ticking a unit approves all of its findings. Use each finding's checkbox to drop any you do not want changed, or Select all and Clear all for the unit. Clearing every finding deselects it.
+  Only approved findings go to Foundry and the gates; other findings stay as they are. The approval band shows the approved count and source spans, package names and versions sent to npm/OSV when enabled, and which functions will execute locally.
+6. Tick Also check npm dependencies if you want the dependency upgrade in this run. Leave it unticked for a source-only run: no npm Registry or OSV lookups happen and the dependency update and validate stage are skipped. Then approve once. While assessment or transformation runs, a spinner shows that work is in progress. Transformation also shows the current unit and step, such as baseline capture or rewrite, with a completed-unit count.
 7. Review each proposal:
    * Approved findings targeted lists the findings you approved for that unit, with their line and column.
    * The BEFORE and PROPOSED columns show the replacement span.
@@ -71,9 +101,13 @@ This walkthrough uses the headline `samples/invoice-desk` project. It shows both
    * Remaining findings list what the rewrite left behind. `too-many-params` on `formatLine` is expected because the signature is preserved.
    * Rejected proposals show both attempts and which gates each failed. They cannot be selected.
 8. Tick the ready proposals. If a selected proposal is marked not-checked and has not been acknowledged, Apply opens a dialog listing the affected proposal and why characterisation did not run. Choose Go back to change the selection, or Acknowledge and continue to apply it without a behaviour check. The top-level statement has no function inputs, so it always needs acknowledgement.
-9. Select the `lodash@4.17.20` patch update once its npm and OSV evidence appears (`uuid@3.4.0` is shown as deprecated but is only used for CLI invoice IDs), then choose Review update diff and build. The server re-runs every stable baseline against the combined staged copy before anything is applied.
-10. In Build check, inspect the package and lockfile diff and the exact commands, then approve the build separately. After the build passes, the server replays each stable baseline against the copy with the upgraded lodash installed. If `buildInvoiceLines` returns anything different, the update is blocked and the build result names the function and the matched case count.
-11. After the build and the post-update characterisation pass, download the ZIP. The generated tests are under `<project>/__characterisation__/`; from the extracted project folder, run them with `node --test __characterisation__`. They replay the stable cases against the transformed functions. The workflow does not run these tests automatically. Open `TECH-DEBT-REPORT.md` to see the rating move from D towards B, each applied change, the exported test-file paths, the post-update characterisation result, and the residual findings.
+9. Change Allowed update level to Up to major. Each candidate shows its level, and `date-fns` 1.28.4 to 4.x is marked Source migration supported. Select only the `date-fns` major update, then choose Review update diff and build.
+   The server re-runs every stable baseline against the combined staged copy before anything is applied.
+10. In Validate, the package section confirms a curated source migration is available. Inspect the package and lockfile diff and the exact commands, then approve the build and tests. The project test passes on the original upload but fails on the upgraded copy because date-fns 2.0 and later reject `YYYY` format tokens and date strings.
+11. Choose Approve and propose migration. Foundry receives only `src/due-date.js`, the curated notes, and the failure output. Review the migrated code (expected shape: `parseISO` and `yyyy-MM-dd`) and its rerun build, project test, and characterisation results, then choose Accept migration and stage.
+12. Download the ZIP. The generated tests are under `<project>/__characterisation__/`; from the extracted project folder, run them with `node --test __characterisation__`. Open `CODE-TRANSFORMATION-REPORT.md`: the Dependency Updates section reports that code changes were needed for compatibility, lists the applied migration edit with before and after code, and shows the build, project test, and characterisation results alongside the source refactors and the rating move from D towards B.
+
+For a lower-risk dependency run, keep Allowed update level at Patch only and select the `lodash@4.17.20` patch update instead. The build and post-update characterisation pass without a migration, and the report states that no compatibility code changes were needed for the checks that ran.
 
 For a shorter source-only run, use `samples/dispatch-desk`. Select `summarizeDispatch`, approve, review its cases and gates, apply, and download. There are no dependencies, so stage 04 is skipped.
 
@@ -89,10 +123,12 @@ Each server module owns one responsibility. The UI calls them through a small HT
 | `server/characterise/` | `harness.js` writes the project to a temporary folder, installs locked dependencies when needed, and runs each case in a separate `node --permission` process that can only read that folder. `runner.cjs` captures the return value, thrown error, argument mutation, and console output. `export.js` renders the replayable `node:test` file. |
 | `server/transform/gates.js` | Applies the rewrite to a copy of the file and checks span, hash, syntax, invariants, scope, metric improvement, and new findings. |
 | `server/transform/agent.js` | Runs one unit end to end: generate inputs, capture the baseline, request a rewrite, run the static gates, replay the baseline against the rewritten copy, and retry once with the failed gates, unresolved findings, and mismatched cases as feedback. |
-| `server/dependency-review.js` | Inventories declared and locked npm packages and gathers npm Registry and OSV evidence for update candidates. |
-| `server/dependency-build.js` | Resolves an approved update with `npm install --package-lock-only`, then runs `npm ci` and `npm run build` with lifecycle scripts disabled in a temporary copy. |
+| `server/dependency-review.js` | Inventories declared and locked npm packages, gathers npm Registry and OSV evidence, and labels the highest patch, minor, and major update options. |
+| `server/dependency-build.js` | Resolves an approved package and level with `npm install --package-lock-only`, then runs `npm ci`, `npm run build`, and `npm test` with lifecycle scripts disabled in temporary copies. |
+| `server/dependency-migration.js` | Holds curated migration guides, finds non-test files that import an upgraded package, requests Foundry edits, validates them, and reruns the checks with one retry. |
 | `server/workflow.js` | Owns sessions, the five-unit limit, approval checks, proposal state, the combined re-check before apply, the post-update characterisation replay, characterisation test staging, and the change report. |
-| `server/api.js` | Exposes `/api/status`, `/api/analyze/prepare`, `/api/sessions/:id/transform`, `/progress`, `/apply`, `/updates/prepare`, `/updates/build`, and `/download`. |
+| `server/api.js` | Exposes `/api/status`, `/api/analyze/prepare`, `/api/sessions/:id/transform`, `/progress`, `/apply`, `/updates/prepare`, `/updates/build`, `/updates/migrate`, `/updates/migrate/accept`, and `/download`. |
+| `server/editor-export.js` | Saves the applied output to a separate temporary folder and launches VS Code with `--new-window` through `/api/sessions/:id/open-in-vscode`. |
 | `src/App.jsx` | Renders the stages, approval band, proposals, gate list, case tabs, build checkpoint, and export. |
 
 ### How They Work Together
@@ -131,7 +167,9 @@ sequenceDiagram
   end
 ```
 
-The assessor is the single source of truth for findings. The gates re-run it on the rewritten file, so a proposal must reduce the targeted smells without creating new ones. Characterisation is the behaviour check: the original's recorded outputs are the expected values, and the rewrite must reproduce them exactly. The combined re-check before apply catches interactions between proposals in the same file. The post-update replay catches behaviour changes caused by a new dependency version. The generated test file lets you replay the same cases later with `node --test`.
+The assessor is the single source of truth for findings. Gates rerun it on the rewritten file; a proposal must reduce targeted smells without adding new ones. Characterisation compares the rewrite with the original's recorded outputs.
+
+The combined re-check catches interactions among proposals. A post-update replay checks for behavior changes caused by dependency updates. Generated tests let you replay the same cases with `node --test`.
 
 ## Assessment Rules
 
@@ -176,7 +214,7 @@ The app asks Foundry for exactly five JSON argument cases only after you select 
 
 The runner supports top-level CommonJS functions in modules without executable top-level expressions. It captures return values, thrown errors, argument mutation, and console output. Class methods, nested functions, and ESM targets are not characterised in v1. Characterisation test files are included in the ZIP for functions with stable baselines.
 
-Node 24's permission model restricts filesystem access and child processes for the runner, but it does not block network access. The consent panel says when uploaded functions will execute. Build commands also execute uploaded code in a temporary directory that is not an OS sandbox. npm installation uses `--ignore-scripts`; lifecycle scripts remain disabled and project tests are not run.
+Node 24's permission model restricts filesystem access and child processes for the runner, but it does not block network access. The consent panel says when uploaded functions will execute. Build and test commands also execute uploaded code in temporary directories that are not an OS sandbox. npm installation uses `--ignore-scripts`; lifecycle scripts remain disabled, and project tests run only after the stage 04 approval.
 
 Static gates require an exact unchanged source span, valid updated syntax, preserved function name/parameter count/module exports/module format, no colliding helper names, metric improvement, and no new warning-or-higher findings. Statement rewrites also pass a scope check for unsafe `var` conversions. Named-constant declarations with literal values at the start of a function do not count toward its length, so extracting magic numbers cannot create a new `long-function` finding.
 

@@ -8,7 +8,8 @@ const { transformUnit } = require('./transform/agent');
 const { compareRewrite } = require('./characterise/harness');
 const { renderTestFile } = require('./characterise/export');
 const { assessNpmDependencies, inventoryNpmFiles } = require('./dependency-review');
-const { prepareDependencyBuild: resolveDependencyBuild, runApprovedBuild } = require('./dependency-build');
+const { prepareDependencyBuild: resolveDependencyBuild, runApprovedBuild, checkProject, projectTestSummary } = require('./dependency-build');
+const { migrationGuides, proposeMigration } = require('./dependency-migration');
 const { getFoundryConfiguration, requestStructured } = require('./foundry-client');
 
 const SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.jsx']);
@@ -424,7 +425,7 @@ function characterisationTestPaths(files) {
   return [...files.keys()].filter((key) => key.includes('/__characterisation__/') && key.endsWith('.test.js')).sort();
 }
 
-function buildChangeReport(selected, { beforeAssessment, afterAssessment, updates = [], lockChanges = [], omittedLockChanges = 0, build = null, testFiles = [] } = {}) {
+function buildChangeReport(selected, { beforeAssessment, afterAssessment, updates = [], lockChanges = [], omittedLockChanges = 0, build = null, testFiles = [], migration = null } = {}) {
   return {
     before: beforeAssessment ? { rating: beforeAssessment.rating, debtMinutes: beforeAssessment.debtMinutes, debtHours: beforeAssessment.debtHours } : null,
     after: afterAssessment ? { rating: afterAssessment.rating, debtMinutes: afterAssessment.debtMinutes, debtHours: afterAssessment.debtHours } : null,
@@ -443,12 +444,13 @@ function buildChangeReport(selected, { beforeAssessment, afterAssessment, update
       comparison: proposal.comparison,
       residualFindings: proposal.residualFindings
     })),
-    packageChanges: updates.map(({ name, fromVersion, version }) => ({ name, fromVersion, version })),
+    packageChanges: updates.map(({ name, fromVersion, version, level }) => ({ name, fromVersion, version, level })),
     lockChanges,
     omittedLockChanges,
     build,
+    migration,
     testFiles,
-    tests: selected.some((proposal) => proposal.baseline?.status === 'passed') ? 'characterisation tests exported; project tests not run' : 'not run'
+    tests: selected.some((proposal) => proposal.baseline?.status === 'passed') ? 'characterisation tests exported' : 'no characterisation tests exported'
   };
 }
 
@@ -470,7 +472,7 @@ async function applyApprovedFindings(sessionId, proposalIds, acknowledgedWarning
   return { ...session.appliedSummary, report: session.changeReport };
 }
 
-async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdateNames, acknowledgedWarningIds = [], options = {}) {
+async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdates, acknowledgedWarningIds = [], options = {}) {
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
   if (session.applied) throw appError('This review has already been transformed.');
@@ -479,7 +481,7 @@ async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdateNames
   const source = await prepareApprovedChanges(session, proposalIds, acknowledgedWarningIds, true, options);
   let prepared;
   try {
-    prepared = await resolveDependencyBuild(session, selectedUpdateNames, {
+    prepared = await resolveDependencyBuild(session, selectedUpdates, {
       ...options,
       sourceFiles: source.files,
       sourceFindings: source.selected.length
@@ -492,6 +494,7 @@ async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdateNames
   session.updatePreview.sourceChanges = source.selected;
   session.updatePreview.sourceAssessmentBefore = session.initialAssessment;
   session.updatePreview.sourceAssessmentAfter = source.afterAssessment;
+  session.migration = null;
   session.lastAccessed = Date.now();
   return {
     previewId: prepared.previewId,
@@ -499,7 +502,9 @@ async function prepareApprovedUpdate(sessionId, proposalIds, selectedUpdateNames
     lockChanges: prepared.lockChanges,
     omittedLockChanges: prepared.omittedLockChanges,
     sourceFindings: prepared.sourceFindings,
-    build: prepared.build
+    build: prepared.build,
+    migrationGuides: migrationGuides(prepared.internalPreview.updates).map(({ name, fromVersion, version, title }) =>
+      ({ name, fromVersion, version, title }))
   };
 }
 
@@ -517,52 +522,138 @@ async function replayAfterUpdate(session, proposals, files, options = {}) {
   return { status: failed.length ? 'failed' : results.length ? 'passed' : 'not-run', results };
 }
 
+function characterisationFailure(characterisation) {
+  const drifted = characterisation.results.filter((item) => item.status !== 'passed');
+  return { reason: `Behaviour changed after the dependency update for ${drifted.map((item) => item.name).join(', ')}. Nothing was applied.`,
+    output: drifted.map((item) => `${item.name}: ${item.total ? `${item.matched} of ${item.total} cases matched` : item.reason ?? item.status}`).join('\n') };
+}
+
+function stageUpgrade(session, preview, files, { output, tests, characterisation, migration = null }) {
+  session.files = files;
+  session.sourceFiles = sourceInventory(session.files).sourceFiles;
+  session.assessment = assessProject(session.sourceFiles, session.debtConfig);
+  session.updatePreview = null;
+  session.migration = null;
+  session.applied = true;
+  session.lastAccessed = Date.now();
+  session.appliedSummary = { findings: preview.sourceFindings, files: files.size, packages: preview.updates.length,
+    buildStatus: 'passed', testStatus: tests.status, migratedFiles: migration?.edits.length ?? 0,
+    testFiles: characterisationTestPaths(session.files).length };
+  session.changeReport = buildChangeReport(preview.sourceChanges ?? [], {
+    testFiles: characterisationTestPaths(session.files),
+    beforeAssessment: preview.sourceAssessmentBefore,
+    afterAssessment: session.assessment,
+    updates: preview.updates,
+    lockChanges: preview.lockChanges,
+    omittedLockChanges: preview.omittedLockChanges,
+    build: { status: 'passed', command: 'npm --ignore-scripts run build', output, characterisation, tests },
+    migration: migration ? { summary: migration.summary, guides: migration.guides, edits: migration.edits.map(({ path: editPath, before, after, rationale }) =>
+      ({ path: editPath, before, after, rationale })) } : null
+  });
+  return { status: 'passed', stage: 'build', output, tests, characterisation,
+    updates: preview.updates.map(({ name, fromVersion, version, level }) => ({ name, fromVersion, version, level })),
+    summary: session.appliedSummary, report: session.changeReport };
+}
+
+function keepForMigration(session, preview, baselineTests, failure) {
+  const guides = migrationGuides(preview.updates);
+  session.updatePreview = null;
+  if (!guides.length) return false;
+  session.migration = { id: randomUUID(), preview, baselineTests, failure, guides, proposal: null, started: false };
+  return true;
+}
+
 async function runApprovedUpdateBuild(sessionId, previewId, options = {}) {
   const session = getSession(sessionId);
   if (!session) throw appError('This review expired. Upload the folder again.', 404);
   const preview = session.updatePreview;
   if (!preview || preview.id !== previewId || preview.consumed) throw appError('The update/build preview is missing, expired, or already used.');
   const result = await runApprovedBuild({ status: 'ready', internalPreview: preview }, options);
+  session.lastAccessed = Date.now();
   if (result.status !== 'passed') {
-    session.updatePreview = null;
-    session.lastAccessed = Date.now();
-    return result;
+    const migrationAvailable = keepForMigration(session, preview, result.baselineTests,
+      { stage: result.stage, output: result.output || result.reason });
+    return { ...result, migrationAvailable, migrationId: migrationAvailable ? session.migration.id : null,
+      migrationGuides: migrationAvailable ? session.migration.guides.map(({ name, title }) => ({ name, title })) : [] };
   }
   const characterisation = await replayAfterUpdate(session, preview.sourceChanges ?? [], result.files, options);
   if (characterisation.status === 'failed') {
-    session.updatePreview = null;
-    session.lastAccessed = Date.now();
-    const drifted = characterisation.results.filter((item) => item.status !== 'passed');
-    return { status: 'failed', stage: 'characterisation',
-      reason: `Behaviour changed after the dependency update for ${drifted.map((item) => item.name).join(', ')}. Nothing was applied.`,
-      output: drifted.map((item) => `${item.name}: ${item.total ? `${item.matched} of ${item.total} cases matched` : item.reason ?? item.status}`).join('\n'),
-      characterisation };
+    const failure = characterisationFailure(characterisation);
+    const migrationAvailable = keepForMigration(session, preview, result.baselineTests,
+      { stage: 'characterisation', output: failure.output });
+    return { status: 'failed', stage: 'characterisation', ...failure, characterisation, tests: result.tests, migrationAvailable,
+      migrationId: migrationAvailable ? session.migration.id : null,
+      migrationGuides: migrationAvailable ? session.migration.guides.map(({ name, title }) => ({ name, title })) : [] };
   }
-  session.files = result.files;
-  session.sourceFiles = sourceInventory(session.files).sourceFiles;
-  session.assessment = assessProject(session.sourceFiles, session.debtConfig);
-  session.updatePreview = null;
-  session.applied = true;
+  return stageUpgrade(session, preview, result.files, { output: result.output, tests: result.tests, characterisation });
+}
+
+async function verifyUpgradedFiles(session, migration, files, options = {}) {
+  const { preview, baselineTests } = migration;
+  const checked = await (options.checkProject ?? checkProject)(files, session.rootName,
+    { build: true, test: Boolean(preview.testScript) }, { runCommand: options.runBuildCommand });
+  if (checked.status !== 'passed') return { ...checked, tests: projectTestSummary(baselineTests, null) };
+  const tests = projectTestSummary(baselineTests, checked.tests);
+  if (tests.status === 'failed') return { status: 'failed', stage: 'tests', output: checked.tests.output, tests };
+  const characterisation = await replayAfterUpdate(session, preview.sourceChanges ?? [], files, options);
+  if (characterisation.status === 'failed') {
+    return { status: 'failed', stage: 'characterisation', output: characterisationFailure(characterisation).output, tests, characterisation };
+  }
+  return { status: 'passed', stage: 'build', output: checked.output, tests, characterisation };
+}
+
+async function proposeDependencyMigration(sessionId, migrationId, options = {}) {
+  const session = getSession(sessionId);
+  if (!session) throw appError('This review expired. Upload the folder again.', 404);
+  const migration = session.migration;
+  if (!migration || migration.id !== migrationId || migration.started) throw appError('The migration request is missing, expired, or already used.');
+  migration.started = true;
+  const config = options.config ?? getFoundryConfiguration(options.env);
+  let proposal;
+  try {
+    proposal = await proposeMigration({ guides: migration.guides, files: migration.preview.files,
+      rootName: session.rootName, failure: migration.failure }, {
+      requestStructured: options.requestStructured,
+      foundryOptions: { config, fetchImpl: options.fetchImpl },
+      check: (files) => verifyUpgradedFiles(session, migration, files, options)
+    });
+  } catch (error) {
+    session.migration = null;
+    session.updatePreview = null;
+    throw appError(error.message?.startsWith('No non-test') ? error.message : safeTransformFailure(error));
+  }
+  migration.proposal = proposal;
   session.lastAccessed = Date.now();
-  session.appliedSummary = { findings: preview.sourceFindings, files: result.updatedFiles,
-    packages: result.updates.length, buildStatus: result.status, testFiles: characterisationTestPaths(session.files).length };
-  session.changeReport = buildChangeReport(preview.sourceChanges ?? [], {
-    testFiles: characterisationTestPaths(session.files),
-    beforeAssessment: preview.sourceAssessmentBefore,
-    afterAssessment: session.assessment,
-    updates: result.updates,
-    lockChanges: preview.lockChanges,
-    omittedLockChanges: preview.omittedLockChanges,
-    build: { status: result.status, command: 'npm --ignore-scripts run build', output: result.output, characterisation }
-  });
-  return { status: result.status, stage: result.stage, output: result.output, tests: result.tests, characterisation,
-    updates: result.updates.map(({ name, fromVersion, version }) => ({ name, fromVersion, version })),
-    summary: session.appliedSummary, report: session.changeReport };
+  return {
+    migrationId: migration.id,
+    status: proposal.status,
+    reason: proposal.reason ?? null,
+    summary: proposal.summary ?? '',
+    sentFiles: proposal.sentFiles,
+    attempts: proposal.attempts,
+    edits: proposal.edits.map(({ path: editPath, before, after, rationale }) => ({ path: editPath, before, after, rationale })),
+    checks: proposal.checks ? { status: proposal.checks.status, stage: proposal.checks.stage, output: proposal.checks.output,
+      tests: proposal.checks.tests, characterisation: proposal.checks.characterisation } : null
+  };
+}
+
+function acceptDependencyMigration(sessionId, migrationId) {
+  const session = getSession(sessionId);
+  if (!session) throw appError('This review expired. Upload the folder again.', 404);
+  const migration = session.migration;
+  if (!migration || migration.id !== migrationId || migration.proposal?.status !== 'ready') {
+    throw appError('Only a migration that passed every check can be accepted.');
+  }
+  const { proposal, preview } = migration;
+  return stageUpgrade(session, preview, proposal.files, { output: proposal.checks.output, tests: proposal.checks.tests,
+    characterisation: proposal.checks.characterisation,
+    migration: { ...proposal, guides: migration.guides.map(({ name, fromVersion, version, title }) => ({ name, fromVersion, version, title })) } });
 }
 
 module.exports = {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
+  acceptDependencyMigration,
   applyApprovedFindings,
   getSession,
   getTransformProgress,
@@ -570,6 +661,7 @@ module.exports = {
   prepareApprovedUpdate,
   prepareUpload,
   prepareUploadedFiles,
+  proposeDependencyMigration,
   removeSession,
   replayAfterUpdate,
   safeTransformFailure,

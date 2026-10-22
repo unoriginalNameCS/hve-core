@@ -33,8 +33,11 @@ test('reports branch chains, callback depth, and named arrow functions', () => {
     'function choose(value) { if (value === 1) return 1; else if (value === 2) return 2; else if (value === 3) return 3; else if (value === 4) return 4; else if (value === 5) return 5; else if (value === 6) return 6; else return 0; }'
   ].join('\n'));
   const handle = result.units.find((unit) => unit.name === 'handle');
+  const choose = result.units.find((unit) => unit.name === 'choose');
   assert.equal(handle.metrics.callbackNesting, 3);
   assert.ok(handle.findings.some((item) => item.ruleId === 'callback-nesting'));
+  assert.equal(choose.metrics.maxBranchChain, 6);
+  assert.equal(choose.metrics.maxNesting, 1);
   assert.ok(result.findings.some((item) => item.ruleId === 'long-branch-chain'));
 });
 
@@ -146,9 +149,11 @@ test('invoice-desk starts at rating D with the planned transformation targets', 
   }
   const result = assessProject(sourceFiles);
   assert.equal(new Set(result.findings.map((item) => item.id)).size, result.findings.length);
+  assert.equal(result.units.filter((unit) => unit.findings.length > 0).length, 5);
   const calculateDiscount = result.units.find((unit) => unit.name === 'calculateDiscount');
   const buildInvoiceLines = result.units.find((unit) => unit.name === 'buildInvoiceLines');
   const formatLine = result.units.find((unit) => unit.name === 'formatLine');
+  const formatInvoiceStatus = result.units.find((unit) => unit.name === 'formatInvoiceStatus');
   const debtByRule = Object.groupBy(result.findings, (item) => item.ruleId);
   const ruleSummary = Object.fromEntries(Object.entries(debtByRule).map(([ruleId, findings]) => [ruleId,
     { count: findings.length, minutes: findings.reduce((total, item) => total + item.remediationMinutes, 0) }]));
@@ -159,6 +164,7 @@ test('invoice-desk starts at rating D with the planned transformation targets', 
   assert.ok(buildInvoiceLines.findings.some((item) => item.ruleId === 'long-function'));
   assert.ok(buildInvoiceLines.findings.some((item) => item.ruleId === 'bad-variable-name'));
   assert.ok(formatLine.findings.some((item) => item.ruleId === 'too-many-params'));
+  assert.ok(formatInvoiceStatus.findings.some((item) => item.ruleId === 'long-branch-chain'));
   const statementFindings = result.units.filter((unit) => unit.kind === 'statement').flatMap((unit) => unit.findings);
   for (const ruleId of ['var-declaration', 'loose-equality', 'magic-number']) assert.ok(statementFindings.some((item) => item.ruleId === ruleId));
 });
@@ -220,6 +226,13 @@ function createInvoiceLine(item, category) {
     ['formatLine', `function formatLine(description, sku, quantity, unitPrice, discount, tax, label) {
   const lineTotal = quantity * unitPrice - discount + tax;
   return \`${'${label || description}'} [${'${sku}'}] x${'${quantity}'}: $${'${lineTotal.toFixed(2)}'}\`;
+}`],
+    ['formatInvoiceStatus', `function formatInvoiceStatus(status) {
+  const labels = new Map([
+    ['draft', 'Pending'], ['approved', 'Ready'], ['review', 'Needs review'],
+    ['rejected', 'Declined'], ['void', 'Cancelled'], ['expired', 'Expired']
+  ]);
+  return labels.get(status) ?? 'Unknown';
 }`]
   ]);
   const updatedFiles = sourceFiles.map((sourceFile) => {
@@ -230,8 +243,7 @@ function createInvoiceLine(item, category) {
     }
     if (sourceFile.path.endsWith('/index.js')) {
       content = content.replace('var invoiceCount = invoices.length == 0 ? 99 : invoices.length;',
-        'const NO_INVOICES = 99;\nconst RUN_ID_PREFIX_LENGTH = 8;\nconst invoiceCount = invoices.length === 0 ? NO_INVOICES : invoices.length;');
-      content = content.replace('invoiceRunId.slice(0, 8)', 'invoiceRunId.slice(0, RUN_ID_PREFIX_LENGTH)');
+        'const NO_INVOICES = 99;\nconst invoiceCount = invoices.length === 0 ? NO_INVOICES : invoices.length;');
     }
     return { ...sourceFile, content };
   });

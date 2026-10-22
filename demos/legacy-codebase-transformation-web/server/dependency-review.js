@@ -4,6 +4,7 @@ const { createHash } = require('node:crypto');
 const path = require('node:path');
 const semver = require('semver');
 const { isExcludedPath } = require('../../legacy-codebase-transformation/extension/src/workspace-scan');
+const { migrationGuides } = require('./dependency-migration');
 
 const DEPENDENCY_LIMITS = Object.freeze({
   maxDocuments: 200,
@@ -17,6 +18,7 @@ const DEPENDENCY_LIMITS = Object.freeze({
   maxResponseBytes: 2 * 1024 * 1024
 });
 const GROUPS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+const UPDATE_LEVELS = Object.freeze(['patch', 'minor', 'major']);
 const MANAGER_SIGNALS = new Set(['yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb']);
 const UNSUPPORTED = '(unsupported)';
 const REGISTRY_ACCEPT = 'application/vnd.npm.install-v1+json';
@@ -308,6 +310,22 @@ async function requestJson(url, method, body, options) {
   }
 }
 
+function updateLevel(fromVersion, toVersion) {
+  if (semver.major(toVersion) !== semver.major(fromVersion)) return 'major';
+  // Under semver, 0.x minor releases may contain breaking changes.
+  if (semver.minor(toVersion) !== semver.minor(fromVersion)) return semver.major(fromVersion) === 0 ? 'major' : 'minor';
+  return 'patch';
+}
+
+function updateOptions(stable, currentVersion, versions) {
+  const newer = stable.filter((version) => semver.gt(version, currentVersion));
+  return UPDATE_LEVELS.flatMap((level, index) => {
+    const allowed = newer.filter((version) => UPDATE_LEVELS.indexOf(updateLevel(currentVersion, version)) <= index);
+    const best = semver.maxSatisfying(allowed, '*');
+    return best && updateLevel(currentVersion, best) === level ? [{ ...versions.get(best), level }] : [];
+  });
+}
+
 function registryEvidence(name, payload, declarations, now = new Date().toISOString()) {
   if (!object(payload) || payload.name !== name || !object(payload.versions)) throw new Error('Registry identity or response schema was invalid.');
   const versions = new Map();
@@ -332,11 +350,12 @@ function registryEvidence(name, payload, declarations, now = new Date().toISOStr
       groups: declaration.groups,
       lockedVersions: declaration.lockedVersions,
       candidate: candidateVersion ? versions.get(candidateVersion) : null,
-      updateCandidate: latestStable && currentVersion && semver.gt(latestStable.version, currentVersion) ? latestStable : null,
+      updateOptions: currentVersion && declaration.lockedVersions.length === 1 ? updateOptions(stable, currentVersion, versions).map((option) => ({
+        ...option, migrationGuide: migrationGuides([{ name, fromVersion: currentVersion, version: option.version }])[0]?.title ?? null
+      })) : [],
       caveats: [
         ...(!range ? ['Declaration is not a semver range; no compatible candidate inferred.'] : []),
-        ...(!currentVersion ? ['Exact locked version is unknown.'] : []),
-        ...(currentVersion && latestStable && semver.major(currentVersion) !== semver.major(latestStable.version) ? ['Latest stable candidate changes the major version.'] : [])
+        ...(!currentVersion ? ['Exact locked version is unknown.'] : [])
       ]
     };
   });
@@ -438,10 +457,12 @@ async function assessNpmDependencies(inventory, options = {}) {
 
 module.exports = {
   DEPENDENCY_LIMITS,
+  UPDATE_LEVELS,
   assessNpmDependencies,
   inventoryNpmFiles,
   packagePathName,
   publicResolution,
   safeSpec,
+  updateLevel,
   validPackageName
 };

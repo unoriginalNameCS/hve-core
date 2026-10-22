@@ -94,6 +94,7 @@ function requiredChange(finding) {
   switch (finding.ruleId) {
     case 'bad-variable-name': return `Line ${finding.line}: ${finding.message} Rename exactly that identifier (parameters may be renamed) to a descriptive name; renaming other identifiers does not resolve it.`;
     case 'magic-number': return `Line ${finding.line}: ${finding.message} Declare it as a named const at the start of the function body.`;
+    case 'long-branch-chain': return `Line ${finding.line}: ${finding.message} When branches compare one value to fixed keys and return fixed values, replace the chain with a Map lookup and preserve the exact fallback for unknown inputs; do not replace it with another branch chain.`;
     case 'debt-marker': return `Line ${finding.line}: delete the TODO/FIXME/HACK comment. Do not implement what it describes; any new logic changes behaviour and will fail characterisation.`;
     case 'too-many-params': return 'too-many-params: leave the parameter count unchanged; this finding is signature-protected and is not expected to be resolved.';
     default: return `${finding.ruleId}: ${finding.message} Reduce this metric below its threshold.`;
@@ -120,7 +121,7 @@ function buildRewritePrompt(unit, baseline, assessment, feedback = '') {
     `Module format and selected function export status: ${JSON.stringify({ moduleFormat: unit.moduleFormat, isExported: unit.exportNames?.includes(unit.name) })}`,
     `Findings: ${JSON.stringify(findings)}`,
     `Required changes (every item except too-many-params must be resolved; leave any other issue in the code unchanged):\n${requiredChanges.map((item) => `- ${item}`).join('\n')}`,
-    'Hard limits for the result (do not introduce new findings): each function at most 39 non-blank lines excluding named-constant declarations, nesting depth at most 2, cyclomatic complexity at most 9, at most 5 else-if branches. Move logic into adjacent helper functions if needed to stay within these limits; helpers are measured with the same limits.',
+    'Hard limits for the result (do not introduce new findings): each function at most 39 non-blank lines excluding named-constant declarations, nesting depth at most 2, cyclomatic complexity at most 9, and at most 5 branches in any if/else-if chain. Move logic into adjacent helper functions if needed to stay within these limits; helpers are measured with the same limits.',
     `Characterisation baseline: ${JSON.stringify(baselineCases)}`,
     feedback ? `Validation feedback to address: ${feedback}` : '',
     `Selected source span:\n<source>\n${unit.originalText}\n</source>`,

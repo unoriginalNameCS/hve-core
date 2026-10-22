@@ -1,14 +1,14 @@
 'use strict';
 
 const invoices = require('../data/invoices.json');
-const { v4: uuidv4 } = require('uuid');
 const { calculateDiscount } = require('./discount');
 const { buildInvoiceLines } = require('./invoice-lines');
 const { summarizeTotals } = require('./summary');
 const { formatLine } = require('./format-line');
+const { formatDueDate } = require('./due-date');
+const { formatInvoiceStatus } = require('./status-label');
 
 var invoiceCount = invoices.length == 0 ? 99 : invoices.length;
-const invoiceRunId = uuidv4();
 const results = [];
 for (const invoice of invoices) {
   const lines = buildInvoiceLines(invoice);
@@ -20,6 +20,8 @@ for (const invoice of invoices) {
   ));
   results.push({
     invoiceNumber: invoice.invoiceNumber,
+    status: formatInvoiceStatus(invoice.status),
+    dueDate: formatDueDate(invoice.issuedOn, invoice.termsDays),
     lineCount: lines.length,
     discount,
     totals,
@@ -27,5 +29,5 @@ for (const invoice of invoices) {
   });
 }
 console.log('Invoice Desk preview');
-console.log(`Run ${invoiceRunId.slice(0, 8)} · ${invoiceCount} invoice(s)`);
+console.log(`${invoiceCount} invoice(s)`);
 console.log(JSON.stringify(results, null, 2));

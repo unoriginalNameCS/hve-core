@@ -7,6 +7,7 @@ const path = require('node:path');
 const { inflateRawSync } = require('node:zlib');
 const test = require('node:test');
 const { createApiApp } = require('../server/api');
+const { prepareEditorFolder } = require('../server/editor-export');
 const { getSession, removeSession } = require('../server/workflow');
 
 const env = {
@@ -114,12 +115,86 @@ test('assessment through approved apply returns a ZIP with the combined technica
   const downloaded = await fetch(`${baseUrl}/api/sessions/${sessionId}/download`);
   assert.equal(downloaded.status, 200);
   const zip = Buffer.from(await downloaded.arrayBuffer());
-  assert.ok(zip.includes(Buffer.from('TECH-DEBT-REPORT.md')));
-  const report = readZipEntry(zip, 'TECH-DEBT-REPORT.md');
+  assert.ok(zip.includes(Buffer.from('CODE-TRANSFORMATION-REPORT.md')));
+  const report = readZipEntry(zip, 'CODE-TRANSFORMATION-REPORT.md');
   assert.match(report, /Technical Debt Transformation Report/);
   assert.match(report, /Assessment before:/);
   assert.match(report, /Assessment after:/);
+  assert.doesNotMatch(report, /## Dependency Updates/);
   assert.equal(getSession(sessionId).changeReport.sourceChanges.length, 1);
+});
+
+test('open in VS Code requires approval and applied output, writes the complete copy, and preserves later edits', async (context) => {
+  const opened = [];
+  let failLaunch = false;
+  const baseUrl = await startServer(context, { env, openVscode: async (folder) => {
+    if (failLaunch) throw new Error('Missing editor');
+    opened.push(folder);
+  } });
+  const prepared = await upload(baseUrl, 'sample project', new Map([
+    ['src/value.js', Buffer.from('var amount = 4;')],
+    ['assets/data.txt', Buffer.from('unchanged')]
+  ]));
+  const session = getSession(prepared.sessionId);
+  const url = `${baseUrl}/api/sessions/${session.id}/open-in-vscode`;
+  const open = (body = { approved: true }, headers = {}) => fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body)
+  });
+  context.after(async () => {
+    if (session.editorFolder) await fs.rm(path.dirname(await session.editorFolder), { recursive: true, force: true });
+    removeSession(session.id);
+  });
+  assert.equal((await open({})).status, 400);
+  assert.equal((await open()).status, 409);
+  assert.equal((await open({ approved: true }, { Origin: 'https://other.example' })).status, 403);
+  assert.equal(opened.length, 0);
+  session.applied = true;
+  session.files.set('sample project/src/value.js', Buffer.from('const amount = 4;'));
+  session.files.set('sample project/__characterisation__/value.test.js', Buffer.from('test preview'));
+  session.changeReport = {
+    before: { rating: 'D' }, after: { rating: 'B' }, sourceChanges: [],
+    packageChanges: [{ name: 'date-fns', fromVersion: '1.28.4', version: '4.4.0', level: 'major' }],
+    lockChanges: [{ name: 'date-fns', from: '1.28.4', to: '4.4.0' }], omittedLockChanges: 0,
+    build: {
+      status: 'passed', command: 'npm --ignore-scripts run build', output: 'build passed',
+      characterisation: { status: 'passed', results: [{ name: 'formatDueDate', matched: 2, total: 2 }] },
+      tests: { command: 'npm --ignore-scripts run test', baseline: { status: 'failed' }, upgraded: { status: 'passed' } }
+    },
+    migration: {
+      summary: 'Updated date format tokens for the dependency upgrade.',
+      guides: [{ title: 'date-fns 1.x to 2.x' }],
+      edits: [{ path: 'src/due-date.js', rationale: 'Use the current format tokens.', before: "'YYYY-MM-DD'", after: "'yyyy-MM-dd'" }]
+    }
+  };
+  const response = await open();
+  assert.equal(response.status, 200);
+  const { folder } = await response.json();
+  assert.deepEqual(opened, [folder]);
+  assert.equal(await fs.readFile(path.join(folder, 'src/value.js'), 'utf8'), 'const amount = 4;');
+  assert.equal(await fs.readFile(path.join(folder, 'assets/data.txt'), 'utf8'), 'unchanged');
+  assert.equal(await fs.readFile(path.join(folder, '__characterisation__/value.test.js'), 'utf8'), 'test preview');
+  const report = await fs.readFile(path.join(folder, 'CODE-TRANSFORMATION-REPORT.md'), 'utf8');
+  assert.match(report, /Assessment after: B/);
+  assert.match(report, /## Dependency Updates[\s\S]*### Behavior Compatibility/);
+  assert.match(report, /Code changes needed for dependency compatibility: Yes/);
+  assert.match(report, /Compatibility code changes applied: 1 migration edit/);
+  assert.match(report, /Post-update characterisation: passed \| formatDueDate 2\/2/);
+  assert.match(report, /### Compatibility Code Changes[\s\S]*##### Before[\s\S]*##### After/);
+  await fs.writeFile(path.join(folder, 'src/value.js'), 'user edit');
+  assert.equal((await open()).status, 200);
+  assert.equal(await fs.readFile(path.join(folder, 'src/value.js'), 'utf8'), 'user edit');
+  failLaunch = true;
+  assert.equal((await open()).status, 500);
+  assert.equal((await fetch(`${baseUrl}/api/sessions/${session.id}/download`)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/api/sessions/missing/open-in-vscode`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approved: true })
+  })).status, 404);
+});
+
+test('editor export rejects paths outside the uploaded project', async () => {
+  for (const invalidPath of ['sample/../escaped.js', 'other/source.js', 'sample/C:/escaped.js', 'sample/..\\escaped.js']) {
+    await assert.rejects(prepareEditorFolder({ rootName: 'sample', files: new Map([[invalidPath, Buffer.from('invalid')]]) }, 'report'), /Invalid output path/);
+  }
 });
 
 test('dependency assessment follows combined approval and build runs only after its checkpoint', async (context) => {
@@ -187,7 +262,7 @@ test('dependency assessment follows combined approval and build runs only after 
 
   const updateResponse = await fetch(`${baseUrl}/api/sessions/${sessionId}/updates/prepare`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approvedProposalIds: [], acknowledgedWarnings: [], selectedUpdateNames: ['sample-lib'] })
+    body: JSON.stringify({ approvedProposalIds: [], acknowledgedWarnings: [], selectedUpdates: [{ name: 'sample-lib', level: 'minor' }] })
   });
   assert.equal(updateResponse.status, 200);
   const updatePreview = await updateResponse.json();
@@ -211,5 +286,10 @@ test('dependency assessment follows combined approval and build runs only after 
   assert.deepEqual(buildCalls, ['install', 'build']);
   const downloaded = await fetch(`${baseUrl}/api/sessions/${sessionId}/download`);
   const zip = Buffer.from(await downloaded.arrayBuffer());
-  assert.match(readZipEntry(zip, 'TECH-DEBT-REPORT.md'), /sample-lib: 1.0.0 -> 1.2.0/);
+  const report = readZipEntry(zip, 'CODE-TRANSFORMATION-REPORT.md');
+  assert.match(report, /## Dependency Updates/);
+  assert.match(report, /sample-lib: 1.0.0 -> 1.2.0/);
+  assert.match(report, /Code changes needed for dependency compatibility: No, not for the checks that ran\./);
+  assert.match(report, /Compatibility code changes applied: None/);
+  assert.match(report, /Post-update characterisation: not-run/);
 });

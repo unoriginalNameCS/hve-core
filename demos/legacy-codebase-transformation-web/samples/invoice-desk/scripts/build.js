@@ -4,6 +4,14 @@ const assert = require('node:assert/strict');
 const invoices = require('../data/invoices.json');
 const { buildInvoiceLines } = require('../src/invoice-lines');
 const { summarizeTotals } = require('../src/summary');
+const { formatInvoiceStatus } = require('../src/status-label');
+
+for (const [status, label] of [
+  ['draft', 'Pending'], ['approved', 'Ready'], ['review', 'Needs review'],
+  ['rejected', 'Declined'], ['void', 'Cancelled'], ['expired', 'Expired'], ['unknown', 'Unknown']
+]) {
+  assert.equal(formatInvoiceStatus(status), label);
+}
 
 for (const invoice of invoices) {
   const lines = buildInvoiceLines(invoice);

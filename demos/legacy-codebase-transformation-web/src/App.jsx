@@ -4,11 +4,25 @@ const STEPS = [
   { id: 'upload', number: '01', title: 'Choose project' },
   { id: 'assessment', number: '02', title: 'Assess locally' },
   { id: 'review', number: '03', title: 'Review proposals' },
-  { id: 'build', number: '04', title: 'Build check' },
+  { id: 'build', number: '04', title: 'Validate' },
   { id: 'export', number: '05', title: 'Export' }
 ];
 const OMIT_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor', 'bin', 'obj', 'dist', 'build', 'coverage', 'generated', 'out', 'target']);
 const MAX_SELECTED_UNITS = 5;
+const UPDATE_LEVELS = ['patch', 'minor', 'major'];
+const UPDATE_POLICIES = [
+  { value: 'patch', label: 'Patch only' },
+  { value: 'minor', label: 'Up to minor' },
+  { value: 'major', label: 'Up to major' }
+];
+
+function policyCandidate(declaration, policy) {
+  return (declaration.updateOptions ?? []).filter((option) => UPDATE_LEVELS.indexOf(option.level) <= UPDATE_LEVELS.indexOf(policy)).at(-1) ?? null;
+}
+
+function UpdateLevel({ level }) {
+  return <span className={`update-level level-${level}`}>{level}</span>;
+}
 
 function formatBytes(value) {
   if (value < 1024) return `${value} B`;
@@ -44,10 +58,12 @@ function DebtRating({ rating }) {
   return <span className={`debt-rating rating-${rating || 'unknown'}`}>{rating || '?'}</span>;
 }
 
-function DependencyEvidence({ assessment, inventory, selectedUpdates, onToggleUpdate }) {
+function DependencyEvidence({ assessment, inventory, selectedUpdates, onToggleUpdate, updatePolicy, onPolicyChange }) {
   const registry = assessment?.registry || [];
   const advisories = assessment?.advisories || [];
   const advisoryMatches = advisories.reduce((total, item) => total + item.matches.length, 0);
+  const updatesAvailable = inventory.buildAvailable && inventory.buildScript &&
+    registry.some((entry) => entry.declarations.some((item) => item.updateOptions?.length));
   return (
     <section className="dependency-evidence" aria-labelledby="dependency-title">
       <div className="evidence-heading">
@@ -57,7 +73,12 @@ function DependencyEvidence({ assessment, inventory, selectedUpdates, onToggleUp
         </div>
         <span className={`evidence-status status-${assessment.status}`}>{assessment.status}</span>
       </div>
-      <p className="evidence-note">Registry and OSV results are provider evidence, not compatibility guarantees. Package files remain unchanged until the staged build succeeds.</p>
+      <p className="evidence-note">Registry and OSV results are provider evidence, not compatibility guarantees. Package files remain unchanged until the staged build and project tests succeed.</p>
+      {updatesAvailable && <label className="update-policy"><span>Allowed update level</span>
+        <select value={updatePolicy} onChange={(event) => onPolicyChange(event.target.value)}>
+          {UPDATE_POLICIES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+        <small>Patch only is the default. Minor and major updates can change behaviour or APIs.</small></label>}
       <details className="evidence-details" open>
         <summary>Local package inventory</summary>
         <div className="evidence-list">
@@ -81,15 +102,21 @@ function DependencyEvidence({ assessment, inventory, selectedUpdates, onToggleUp
                 {entry.lockedVersions.filter((version) => version.deprecated).map((version) => (
                   <small className="evidence-warning" key={`${entry.name}-${version.version}`}>{version.version} is deprecated: {version.deprecated}</small>
                 ))}
-                {inventory.buildAvailable && inventory.buildScript && entry.declarations.some((item) => item.updateCandidate) && (
+                {updatesAvailable && entry.declarations.some((item) => item.updateOptions?.length) && (
                   <div className="update-candidates">
-                    {entry.declarations.filter((item) => item.updateCandidate).map((declaration) => (
-                      <label className="update-choice" key={`${entry.name}-${declaration.manifest}`}>
-                        <input type="checkbox" checked={selectedUpdates.has(entry.name)} onChange={() => onToggleUpdate(entry.name)} />
-                        <span className="checkmark" aria-hidden="true" />
-                        <span><strong>Update {entry.name}</strong><small>{declaration.lockedVersions.join(', ') || 'unknown'} to {declaration.updateCandidate.version}; build verification required</small></span>
-                      </label>
-                    ))}
+                    {entry.declarations.filter((item) => item.updateOptions?.length).map((declaration) => {
+                      const candidate = policyCandidate(declaration, updatePolicy);
+                      const higher = declaration.updateOptions.filter((option) => UPDATE_LEVELS.indexOf(option.level) > UPDATE_LEVELS.indexOf(updatePolicy));
+                      return <div key={`${entry.name}-${declaration.manifest}`}>
+                        {candidate && <label className="update-choice">
+                          <input type="checkbox" checked={selectedUpdates.has(entry.name)} onChange={() => onToggleUpdate(entry.name)} />
+                          <span className="checkmark" aria-hidden="true" />
+                          <span><strong>Update {entry.name} <UpdateLevel level={candidate.level} /></strong><small>{declaration.lockedVersions.join(', ') || 'unknown'} to {candidate.version}; build and project tests required</small>
+                            {candidate.migrationGuide && <small className="migration-support">Source migration supported ({candidate.migrationGuide}): if checks fail, you can approve Foundry-proposed code changes.</small>}</span>
+                        </label>}
+                        {higher.length > 0 && <small className="update-blocked">{higher.map((option) => `${option.level} ${option.version}${option.migrationGuide ? ' (source migration supported)' : ''}`).join(' · ')} available. Raise the allowed level to select it.</small>}
+                      </div>;
+                    })}
                   </div>
                 )}
               </div>
@@ -334,7 +361,7 @@ function AcknowledgeDialog({ proposals, onConfirm, onCancel }) {
 function ChangeReport({ report }) {
   return (
     <section className="change-report" aria-labelledby="change-report-title">
-      <p className="eyebrow">TECH-DEBT REPORT</p>
+      <p className="eyebrow">CODE TRANSFORMATION REPORT</p>
       <h3 id="change-report-title">Assessment delta</h3>
       <div className="report-rating-row">
         <span><DebtRating rating={report.before?.rating} /> {report.before?.debtMinutes ?? 0} min before</span>
@@ -345,6 +372,7 @@ function ChangeReport({ report }) {
         <li>{report.sourceChanges.length} source units</li>
         <li>{report.packageChanges.length} package updates</li>
         <li>Build: {report.build?.status || 'not run'}</li>
+        <li>Project tests: {report.build?.tests?.status || 'not run'}</li>
         {report.build?.characterisation && <li>Characterisation after update: {report.build.characterisation.status}{report.build.characterisation.results.map((item) => ` · ${item.name} ${item.matched}/${item.total}`).join('')}</li>}
         <li>{report.tests}</li>
       </ul>
@@ -364,7 +392,21 @@ function ChangeReport({ report }) {
           <GateList gates={change.gates} />
         </details>
       ))}
-      {report.packageChanges.map((item) => <p className="report-item" key={item.name}>{item.name}: {item.fromVersion} to {item.version}</p>)}
+      {report.packageChanges.length > 0 && <div className="report-test-files">
+        <p className="eyebrow">DEPENDENCY UPDATES · BEHAVIOR COMPATIBILITY</p>
+        <ul>
+          <li>Code changes needed for dependency compatibility: {report.migration?.edits.length ? 'Yes' : 'No, not for the checks that ran'}</li>
+          <li>Compatibility code changes applied: {report.migration?.edits.length ? `${report.migration.edits.length} migration edit(s)` : 'None'}</li>
+        </ul>
+      </div>}
+      {report.packageChanges.map((item) => <p className="report-item" key={item.name}>{item.name}: {item.fromVersion} to {item.version}{item.level && <> <UpdateLevel level={item.level} /></>}</p>)}
+      {report.migration?.edits.map((edit) => (
+        <details className="report-item" key={edit.path} open>
+          <summary>Dependency migration · {edit.path}</summary>
+          <p className="finding-rationale">{edit.rationale}</p>
+          <div className="change-columns"><div><span>BEFORE</span><pre>{edit.before}</pre></div><div><span>AFTER</span><pre>{edit.after}</pre></div></div>
+        </details>
+      ))}
       {report.build && <details className="report-item"><summary>Build output</summary><pre className="report-output">{report.build.output || 'No output.'}</pre></details>}
     </section>
   );
@@ -386,11 +428,14 @@ export default function App() {
   const [selectedProposals, setSelectedProposals] = useState(new Set());
   const [acknowledgedWarnings, setAcknowledgedWarnings] = useState(new Set());
   const [selectedUpdates, setSelectedUpdates] = useState(new Set());
+  const [updatePolicy, setUpdatePolicy] = useState('patch');
+  const [migration, setMigration] = useState(null);
   const [progress, setProgress] = useState(null);
   const [updatePreview, setUpdatePreview] = useState(null);
   const [buildResult, setBuildResult] = useState(null);
   const [buildAcknowledged, setBuildAcknowledged] = useState(false);
   const [applied, setApplied] = useState(null);
+  const [editorFolder, setEditorFolder] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
@@ -401,6 +446,8 @@ export default function App() {
   }, []);
 
   useEffect(() => { setActiveLine(null); }, [focusedUnitId]);
+
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [stage]);
 
   useEffect(() => {
     if (busy !== 'transform' || !prepared?.sessionId) return undefined;
@@ -554,6 +601,20 @@ export default function App() {
     });
   }
 
+  function changeUpdatePolicy(policy) {
+    setUpdatePolicy(policy);
+    setSelectedUpdates(new Set());
+  }
+
+  function selectedUpdatePayload() {
+    const rootManifest = review.dependencyAssessment.inventory.rootManifest;
+    return [...selectedUpdates].map((name) => {
+      const declaration = review.dependencyAssessment.registry.find((entry) => entry.name === name)?.declarations
+        .find((item) => item.manifest === rootManifest && item.updateOptions?.length);
+      return { name, level: policyCandidate(declaration ?? {}, updatePolicy)?.level };
+    });
+  }
+
   async function applySelected(acks = acknowledgedWarnings) {
     if (!review) return;
     const missing = review.proposals.filter((proposal) => selectedProposals.has(proposal.id) &&
@@ -565,12 +626,13 @@ export default function App() {
       if (selectedUpdates.size) {
         const response = await fetch(`/api/sessions/${review.sessionId}/updates/prepare`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ approvedProposalIds: [...selectedProposals], acknowledgedWarnings: [...acks], selectedUpdateNames: [...selectedUpdates] })
+          body: JSON.stringify({ approvedProposalIds: [...selectedProposals], acknowledgedWarnings: [...acks], selectedUpdates: selectedUpdatePayload() })
         });
         if (!response.ok) throw new Error(await readError(response));
         setUpdatePreview(await response.json());
         setBuildAcknowledged(false);
         setBuildResult(null);
+        setMigration(null);
         setStage('build');
       } else {
         const response = await fetch(`/api/sessions/${review.sessionId}/apply`, {
@@ -609,12 +671,73 @@ export default function App() {
     }
   }
 
+  async function proposeMigration() {
+    if (!review || !buildResult?.migrationId || busy) return;
+    setBusy('migrate');
+    setError('');
+    try {
+      const response = await fetch(`/api/sessions/${review.sessionId}/updates/migrate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ migrationId: buildResult.migrationId, approved: true })
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setMigration(await response.json());
+    } catch (requestError) {
+      setError(requestError.message || 'The dependency migration could not be proposed.');
+      setBuildResult((current) => current && { ...current, migrationAvailable: false });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function acceptMigration() {
+    if (!review || migration?.status !== 'ready' || busy) return;
+    setBusy('migrate-accept');
+    setError('');
+    try {
+      const response = await fetch(`/api/sessions/${review.sessionId}/updates/migrate/accept`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ migrationId: migration.migrationId })
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = await response.json();
+      setApplied({ ...result.summary, report: result.report });
+      setStage('export');
+    } catch (requestError) {
+      setError(requestError.message || 'The migration could not be staged.');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openOutputInVscode() {
+    if (!review || busy) return;
+    setBusy('editor');
+    setError('');
+    setEditorFolder('');
+    try {
+      const response = await fetch(`/api/sessions/${review.sessionId}/open-in-vscode`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved: true })
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const result = await response.json();
+      setEditorFolder(result.folder);
+    } catch (requestError) {
+      setError(requestError.message || 'Could not open VS Code. Download the ZIP instead.');
+    } finally {
+      setBusy('');
+    }
+  }
+
   function resetReview() {
     const sessionId = review?.sessionId || prepared?.sessionId;
     if (sessionId) fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
     setFolder(null); setPrepared(null); setReview(null); setSelectedUnits(new Set()); setApprovedFindings(new Set()); setCheckDependencies(false); setActiveLine(null); setFocusedUnitId(null);
     setSelectedProposals(new Set()); setAcknowledgedWarnings(new Set()); setSelectedUpdates(new Set());
     setProgress(null); setUpdatePreview(null); setBuildResult(null); setBuildAcknowledged(false); setApplied(null);
+    setUpdatePolicy('patch'); setMigration(null);
+    setEditorFolder('');
     setStage('upload'); setError('');
     if (inputRef.current) inputRef.current.value = '';
   }
@@ -632,8 +755,8 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="wordmark" href="#top" aria-label="Technical debt assessor home">
-          <span className="wordmark-mark">TD</span><span>TECHNICAL DEBT <b>/</b> ASSESSOR</span>
+        <a className="wordmark" href="#top" aria-label="Legacy code transformer home">
+          <span className="wordmark-mark">LC</span><span>LEGACY CODE <b>/</b> TRANSFORMER</span>
         </a>
         <div className={`model-status ${connection.configured ? 'is-ready' : 'is-missing'}`}>
           <span className="status-dot" aria-hidden="true" />
@@ -646,8 +769,8 @@ export default function App() {
       <main id="top">
         <section className="tool-heading">
           <div>
-            <p className="eyebrow">LOCAL ASSESSMENT · APPROVAL-GATED TRANSFORMATION</p>
-            <h1>Technical debt assessor</h1>
+            <p className="eyebrow">LOCAL CODE REVIEW · APPROVAL-GATED TRANSFORMATION</p>
+            <h1>Legacy code transformer</h1>
           </div>
           <nav className="stepper" aria-label="Workflow stages">
             {STEPS.map((item, index) => <div className={`step ${index === activeStep ? 'active' : index < activeStep ? 'complete' : ''}`} key={item.id}>
@@ -662,7 +785,7 @@ export default function App() {
           <section className="upload-workspace" aria-labelledby="upload-title">
             <div className="upload-panel">
               <p className="eyebrow">PROJECT FOLDER</p>
-              <h2 id="upload-title">Choose a codebase to assess</h2>
+              <h2 id="upload-title">Choose a codebase to transform</h2>
               <button className="folder-picker" type="button" onClick={() => inputRef.current?.click()} disabled={busy !== ''}>
                 <span className="picker-symbol" aria-hidden="true">+</span>
                 <span className="picker-text"><strong>{folder?.name || 'Select folder'}</strong>
@@ -671,9 +794,9 @@ export default function App() {
               </button>
               <input ref={inputRef} className="visually-hidden" type="file" webkitdirectory="" directory="" multiple onChange={selectFolder} aria-label="Select project folder" />
               {folder && <p className="upload-meta">{folder.files.length} files · {folder.excluded} hidden/generated folders excluded · {formatBytes(folder.totalBytes)}</p>}
-              <div className="upload-footer"><span>Up to 500 files · 25 MB total</span>
+              <div className="upload-footer">
                 <button className="button button-primary" type="button" onClick={prepareFolder} disabled={!folder || busy !== ''}>
-                  {busy === 'prepare' ? <><Spinner />Assessing locally...</> : 'Run local assessment'}
+                  {busy === 'prepare' ? <><Spinner />Assessing...</> : 'Run assessment'}
                 </button>
               </div>
               {busy === 'prepare' && <p className="busy-note" role="status"><Spinner />Parsing source and calculating debt metrics. No code is sent or executed.</p>}
@@ -698,7 +821,7 @@ export default function App() {
 
             <section className="assessment-layout" aria-label="Assessment findings">
               <div className="hotspot-pane">
-                <div className="pane-heading"><div><p className="eyebrow">HOTSPOTS</p><h2>Prioritize by estimated debt</h2></div><span>{selectedUnitCount}/{MAX_SELECTED_UNITS} units selected</span></div>
+                <div className="pane-heading"><div><p className="eyebrow">HOTSPOTS</p><h2>Prioritize by estimated debt</h2></div><span>{selectedUnitCount} selected · max {MAX_SELECTED_UNITS} units</span></div>
                 {assessment.gaps.length > 0 && <p className="local-note">{assessment.gaps.length} files could not be parsed; they are excluded from the rating.</p>}
                 {hotFiles.length ? hotFiles.map((file) => (
                   <section className="hotspot-file" key={file.path}>
@@ -755,7 +878,7 @@ export default function App() {
               {dependencyLookupsAvailable && <label className="build-acknowledgement dependency-toggle">
                 <input type="checkbox" checked={checkDependencies} onChange={(event) => setCheckDependencies(event.target.checked)} disabled={busy !== ''} />
                 <span className="checkmark" aria-hidden="true" />
-                <span>Also check npm dependencies. Sends the package names and versions below to npm Registry and OSV, lists update candidates, and enables the dependency update and build check. Leave unticked for a source-only run.</span>
+                <span>Also check npm dependencies. Sends the package names and versions below to npm Registry and OSV, lists update candidates, and enables the dependency update and validate stage. Leave unticked for a source-only run.</span>
               </label>}
               <div className="approval-disclosures">
                 <p><strong>Foundry</strong><span>{[...selectedUnits].map((id) => assessment.units.find((unit) => unit.id === id)).filter(Boolean).map((unit) => `${unit.path} · ${unit.name}`).join('; ') || 'No source selected'}</span></p>
@@ -783,10 +906,10 @@ export default function App() {
         {stage === 'review' && review && (
           <section className="proposal-review" aria-labelledby="review-title">
             <div className="review-heading"><div><p className="eyebrow">PROPOSAL REVIEW</p><h2 id="review-title">{review.proposals.length} selected-unit proposals</h2>
-              <p className="review-subtitle">{review.sourceDisclosure.units.length} source spans · {review.dependencyAssessment.status === 'skipped' ? 'dependency checks skipped' : `${review.dependencyAssessment.requests} npm/OSV lookups`} · no project tests run</p></div>
+              <p className="review-subtitle">{review.sourceDisclosure.units.length} source spans · {review.dependencyAssessment.status === 'skipped' ? 'dependency checks skipped' : `${review.dependencyAssessment.requests} npm/OSV lookups`} · project tests run only at the validate stage</p></div>
               <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject review</button></div>
             {review.dependencyAssessment?.inventory && review.dependencyAssessment.status !== 'skipped' && <DependencyEvidence assessment={review.dependencyAssessment} inventory={review.dependencyAssessment.inventory}
-              selectedUpdates={selectedUpdates} onToggleUpdate={toggleUpdate} />}
+              selectedUpdates={selectedUpdates} onToggleUpdate={toggleUpdate} updatePolicy={updatePolicy} onPolicyChange={changeUpdatePolicy} />}
             <div className="proposal-list">
               {review.proposals.map((proposal, index) => (
                 <article className={`proposal-item ${selectedProposals.has(proposal.id) ? 'is-selected' : ''}`} key={proposal.id}>
@@ -839,24 +962,59 @@ export default function App() {
             <div className="review-heading"><div><p className="eyebrow">SECOND CHECKPOINT · BUILD</p><h2 id="build-review-title">Review the staged update</h2>
               <p className="review-subtitle">{updatePreview.packageDiff.length} packages · {updatePreview.lockChanges.length} lock entries · {updatePreview.sourceFindings} source proposals</p></div>
               <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Reject staged update</button></div>
-            <section className="update-diff-block"><p className="eyebrow">DIRECT PACKAGE CHANGES</p>{updatePreview.packageDiff.map((item) => <div className="update-diff-row" key={item.name}><strong>{item.name}</strong><span>{item.fromVersion} · {item.fromSpec}</span><span>to {item.version}</span></div>)}</section>
+            <section className="update-diff-block"><p className="eyebrow">DIRECT PACKAGE CHANGES</p>{updatePreview.packageDiff.map((item) => <div className="update-diff-row" key={item.name}><strong>{item.name} <UpdateLevel level={item.level} /></strong><span>{item.fromVersion} · {item.fromSpec}</span><span>to {item.version}</span></div>)}
+              {updatePreview.migrationGuides?.length > 0
+                ? <p className="evidence-note">Source migration supported: {updatePreview.migrationGuides.map((guide) => guide.title).join(' · ')}. If the build, project tests, or characterisation fail on the upgraded copy, you can approve Foundry-proposed code changes, which are rechecked before staging.</p>
+                : updatePreview.packageDiff.some((item) => item.level === 'major') && <p className="evidence-note">Major updates can change the package API. No curated source migration exists for these packages, so a failing check blocks the update.</p>}</section>
             <details className="update-diff-block" open><summary>Lockfile changes ({updatePreview.lockChanges.length + updatePreview.omittedLockChanges})</summary>
               <div className="update-lock-list">{updatePreview.lockChanges.map((item) => <div className="update-diff-row" key={item.path}><strong>{item.name}</strong><span>{item.from || 'new'}</span><span>to {item.to || 'removed'}</span></div>)}</div>
               {updatePreview.omittedLockChanges > 0 && <p className="evidence-note">{updatePreview.omittedLockChanges} more entries are included in the staged lockfile.</p>}</details>
             <section className="build-command-block"><p className="eyebrow">EXECUTION DISCLOSURE</p><code>{updatePreview.build.install}</code><code>{updatePreview.build.command}</code>
-              <p>After a passing build, every stable characterisation baseline replays against the upgraded copy. Lifecycle scripts and project tests are not run. The build command executes uploaded code in a temporary copy, not an OS sandbox.</p>
+              {updatePreview.build.testScript && <code>{updatePreview.build.tests}</code>}
+              <p>{updatePreview.build.testScript
+                ? `Project tests (${updatePreview.build.testScript}) run on the original upload and then on the upgraded copy. They block the update only if they passed on the original.`
+                : 'No project test script was found, so project tests are not run.'} After a passing build, every stable characterisation baseline replays against the upgraded copy. Lifecycle scripts are not run. These commands execute uploaded code in temporary copies, not an OS sandbox.</p>
               <label className="build-acknowledgement"><input type="checkbox" checked={buildAcknowledged} onChange={(event) => setBuildAcknowledged(event.target.checked)} disabled={Boolean(buildResult)} />
-                <span className="checkmark" aria-hidden="true" /><span>I approve the displayed install and build command.</span></label></section>
-            {buildResult && <div className="build-result build-failed" role="status"><strong>Build {buildResult.status}</strong><span>{buildResult.stage}: {buildResult.reason}</span><pre>{buildResult.output}</pre></div>}
-            <div className="consent-footer"><span>Only a successful build makes dependency changes available for download.</span><button className="button button-primary" type="button" onClick={runStagedBuild} disabled={!buildAcknowledged || busy !== '' || Boolean(buildResult)}>{busy === 'build' ? <><Spinner />Installing, building, and re-checking...</> : 'Run approved build'}</button></div>
+                <span className="checkmark" aria-hidden="true" /><span>I approve the displayed install, build{updatePreview.build.testScript ? ', and test' : ''} commands.</span></label></section>
+            {buildResult && <div className="build-result build-failed" role="status"><strong>{buildResult.stage === 'tests' ? 'Project tests failed' : `Build ${buildResult.status}`}</strong><span>{buildResult.stage}: {buildResult.reason}</span>
+              {buildResult.tests?.baseline && <span>Project tests · original {buildResult.tests.baseline.status} · upgraded {buildResult.tests.upgraded?.status ?? 'not run'}</span>}
+              <pre>{buildResult.output}</pre></div>}
+            {buildResult?.migrationAvailable && !migration && <section className="migration-panel">
+              <p className="eyebrow">CURATED MIGRATION AVAILABLE</p>
+              <h3>{buildResult.migrationGuides.map((guide) => guide.title).join(' · ')}</h3>
+              <p>Approving sends the non-test source files that import the upgraded package, the curated migration notes, and the failure output above to Foundry. Each proposed edit is rebuilt and re-tested in a temporary copy, with one retry. Nothing is staged until you accept it.</p>
+              <button className="button button-primary" type="button" onClick={proposeMigration} disabled={busy !== ''}>{busy === 'migrate' ? <><Spinner />Proposing migration and re-checking...</> : 'Approve and propose migration'}</button>
+            </section>}
+            {migration && <section className="migration-panel">
+              <p className="eyebrow">DEPENDENCY MIGRATION · {migration.status}</p>
+              <h3>{migration.summary || (migration.status === 'ready' ? 'Migration passed every check.' : 'Migration was not accepted by the checks.')}</h3>
+              <p className="detail-location">Sent to Foundry: {migration.sentFiles.join(', ')} · {migration.attempts.length} attempt{migration.attempts.length === 1 ? '' : 's'}</p>
+              {migration.reason && <p className="failure-line">{migration.reason}</p>}
+              {migration.checks && <p className="local-note">{migration.checks.status === 'passed' ? 'Build passed' : `Failed at ${migration.checks.stage}`} · project tests {migration.checks.tests?.status ?? 'not run'} · characterisation {migration.checks.characterisation?.status ?? 'not run'}</p>}
+              {migration.edits.map((edit) => <details className="evidence-details" key={edit.path} open>
+                <summary>{edit.path}</summary>
+                <p className="finding-rationale">{edit.rationale}</p>
+                <div className="change-columns"><div><span>BEFORE</span><pre>{edit.before}</pre></div><div><span>MIGRATED</span><pre>{edit.after}</pre></div></div>
+              </details>)}
+              {migration.status !== 'ready' && migration.checks?.output && <pre className="report-output">{migration.checks.output}</pre>}
+            </section>}
+            <div className="consent-footer"><span>Only a passing build and project tests make dependency changes available for download.</span>
+              {migration?.status === 'ready'
+                ? <button className="button button-primary" type="button" onClick={acceptMigration} disabled={busy !== ''}>{busy === 'migrate-accept' ? <><Spinner />Staging migration...</> : 'Accept migration and stage'}</button>
+                : <button className="button button-primary" type="button" onClick={runStagedBuild} disabled={!buildAcknowledged || busy !== '' || Boolean(buildResult)}>{busy === 'build' ? <><Spinner />Installing, building, testing, and re-checking...</> : 'Run approved build and tests'}</button>}</div>
           </section>
         )}
 
         {stage === 'export' && review && applied && (
           <section className="export-panel" aria-labelledby="export-title"><p className="eyebrow">TRANSFORMATION READY</p><h2 id="export-title">Approved copy is ready.</h2>
-            <p className="export-copy">{applied.proposals ?? applied.findings ?? 0} source proposals · {applied.packages ?? 0} package updates · {applied.files ?? 0} staged files · {applied.testFiles ?? 0} characterisation test files. The uploaded folder was not modified; project tests were not run.</p>
+            <p className="export-copy">{applied.proposals ?? applied.findings ?? 0} source proposals · {applied.packages ?? 0} package updates · {applied.migratedFiles ?? 0} migrated files · {applied.files ?? 0} staged files · {applied.testFiles ?? 0} characterisation test files. The uploaded folder was not modified; project tests {applied.testStatus === 'passed' ? 'passed on the upgraded copy' : applied.testStatus ? `were ${applied.testStatus}` : 'were not run'}.</p>
             <div className="export-actions"><a className="button button-primary download-button" href={`/api/sessions/${review.sessionId}/download`}>Download transformed ZIP <span aria-hidden="true">↓</span></a>
-              <button className="button button-quiet" type="button" onClick={resetReview}>Assess another folder</button></div>
+              <button className="button button-primary" type="button" onClick={openOutputInVscode} disabled={busy !== ''}
+                title="Save a separate output copy and open it in a new VS Code window">
+                {busy === 'editor' ? <><Spinner />Opening VS Code...</> : 'Open in VS Code'}
+              </button>
+              <button className="button button-quiet" type="button" onClick={resetReview} disabled={busy !== ''}>Assess another folder</button></div>
+            {editorFolder && <p className="local-note editor-output" role="status">Requested a new VS Code window for <code>{editorFolder}</code></p>}
             {applied.report && <ChangeReport report={applied.report} />}
           </section>
         )}

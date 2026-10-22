@@ -6,12 +6,13 @@ const path = require('node:path');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const semver = require('semver');
-const { DEPENDENCY_LIMITS, packagePathName, publicResolution, validPackageName } = require('./dependency-review');
+const { DEPENDENCY_LIMITS, UPDATE_LEVELS, packagePathName, publicResolution, validPackageName } = require('./dependency-review');
 
 const MAX_SELECTED_UPDATES = 10;
 const MAX_RESOLUTION_MS = 90000;
 const MAX_INSTALL_MS = 180000;
 const MAX_BUILD_MS = 120000;
+const MAX_TEST_MS = 180000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const REGISTRY = 'https://registry.npmjs.org/';
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -29,25 +30,28 @@ function parseObject(bytes) {
   return value;
 }
 
-function updateEvidence(assessment, inventory, packageName) {
-  if (!validPackageName(packageName)) throw fault('invalid-selection');
+function updateEvidence(assessment, inventory, selection) {
+  const packageName = selection?.name;
+  if (!object(selection) || Object.keys(selection).some((key) => !['name', 'level'].includes(key)) ||
+      !validPackageName(packageName) || !UPDATE_LEVELS.includes(selection.level)) throw fault('invalid-selection');
   const registry = assessment.registry.find((entry) => entry.name === packageName && entry.status === 'completed');
   const declaration = registry?.declarations.find((entry) => entry.manifest === inventory.rootManifest &&
-    entry.lockedVersions.length === 1 && entry.updateCandidate?.status === 'completed' &&
-    !entry.updateCandidate.deprecated);
-  if (!declaration) throw fault('candidate-unavailable');
+    entry.lockedVersions.length === 1);
+  const option = declaration?.updateOptions?.find((entry) => entry.level === selection.level &&
+    entry.status === 'completed' && !entry.deprecated);
+  if (!option) throw fault('candidate-unavailable');
   const fromVersion = declaration.lockedVersions[0];
-  const toVersion = declaration.updateCandidate.version;
+  const toVersion = option.version;
   if (semver.valid(fromVersion) !== fromVersion || semver.valid(toVersion) !== toVersion || !semver.gt(toVersion, fromVersion)) {
     throw fault('candidate-invalid');
   }
-  return { name: packageName, fromVersion, fromSpec: declaration.spec, version: toVersion, groups: declaration.groups };
+  return { name: packageName, fromVersion, fromSpec: declaration.spec, version: toVersion, level: option.level, groups: declaration.groups };
 }
 
-function normalizeUpdates(names, assessment, inventory) {
-  if (!Array.isArray(names) || names.length < 1 || names.length > MAX_SELECTED_UPDATES ||
-      names.some((name) => typeof name !== 'string') || new Set(names).size !== names.length) throw fault('invalid-selection');
-  return names.map((name) => updateEvidence(assessment, inventory, name)).sort((left, right) => left.name.localeCompare(right.name));
+function normalizeUpdates(selections, assessment, inventory) {
+  if (!Array.isArray(selections) || selections.length < 1 || selections.length > MAX_SELECTED_UPDATES ||
+      new Set(selections.map((item) => item?.name)).size !== selections.length) throw fault('invalid-selection');
+  return selections.map((selection) => updateEvidence(assessment, inventory, selection)).sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function encodeJson(originalBytes, value) {
@@ -104,7 +108,8 @@ function processEnvironment(tempRoot) {
 }
 
 function runNpm(args, cwd, stage, options = {}) {
-  const timeoutMs = options.timeoutMs ?? (stage === 'resolve' ? MAX_RESOLUTION_MS : stage === 'install' ? MAX_INSTALL_MS : MAX_BUILD_MS);
+  const timeoutMs = options.timeoutMs ?? (stage === 'resolve' ? MAX_RESOLUTION_MS : stage === 'install' ? MAX_INSTALL_MS :
+    stage === 'test' ? MAX_TEST_MS : MAX_BUILD_MS);
   if (options.runCommand) return options.runCommand({ args: ['npm', ...args], cwd, stage, timeoutMs });
   const cli = npmCliPath();
   if (!cli) return Promise.reject(fault('npm-unavailable'));
@@ -175,6 +180,54 @@ function npmOptions() {
   ];
 }
 
+function projectTestScript(manifest) {
+  const script = manifest?.scripts?.test;
+  return typeof script === 'string' && script.trim() && !/no test specified/i.test(script) ? script : null;
+}
+
+async function checkProject(files, rootName, { build = true, test = false } = {}, options = {}) {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codebase-update-check-'));
+  const failed = (stage, result) => ({ status: 'failed', stage, reason: result.reason || `${stage}-failed`,
+    output: result.output, timedOut: Boolean(result.timedOut) });
+  try {
+    const projectRoot = await writeProjectFiles(files, rootName, tempRoot);
+    const install = await runNpm(['ci', ...npmOptions()], projectRoot, 'install', { ...options, tempRoot });
+    if (install.exitCode !== 0) return failed('install', install);
+    let output = '';
+    if (build) {
+      const result = await runNpm(['--ignore-scripts', 'run', 'build'], projectRoot, 'build', { ...options, tempRoot });
+      if (result.exitCode !== 0) return failed('build', result);
+      output = result.output;
+    }
+    let tests = null;
+    if (test) {
+      const result = await runNpm(['--ignore-scripts', 'run', 'test'], projectRoot, 'test', { ...options, tempRoot });
+      tests = { status: result.exitCode === 0 ? 'passed' : 'failed', output: result.output,
+        timedOut: Boolean(result.timedOut), reason: result.reason ?? null };
+    }
+    return { status: 'passed', stage: build ? 'build' : 'install', output, tests };
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function projectTestSummary(baseline, upgraded) {
+  if (!baseline) return { status: 'not-available', command: null, baseline: null, upgraded: null };
+  const command = 'npm --ignore-scripts run test';
+  if (baseline.status !== 'passed') {
+    return { status: 'not-gating', command, baseline, upgraded,
+      reason: 'Project tests did not pass on the original upload, so they cannot gate the update.' };
+  }
+  if (!upgraded) return { status: 'not-run', command, baseline, upgraded: null };
+  return { status: upgraded.status, command, baseline, upgraded };
+}
+
+async function baselineTests(staged, options) {
+  if (!staged.testScript) return null;
+  const result = await checkProject(staged.baselineFiles, staged.rootName, { build: false, test: true }, options);
+  return result.status === 'passed' ? result.tests : { status: 'unavailable', output: result.output, reason: result.reason };
+}
+
 async function prepareDependencyBuild(session, selectedNames, options = {}) {
   const inventory = session.dependencyInventory;
   const rootManifest = `${session.rootName}/package.json`;
@@ -201,7 +254,7 @@ async function prepareDependencyBuild(session, selectedNames, options = {}) {
     resolution = await runNpm(['install', '--package-lock-only', ...npmOptions()], projectRoot, 'resolve', { ...options, tempRoot });
     if (resolution.exitCode !== 0) {
       return { status: 'failed', reason: resolution.reason || 'resolution-failed', output: resolution.output,
-        timedOut: Boolean(resolution.timedOut), selectedUpdates: updates.map(({ name, fromVersion, version }) => ({ name, fromVersion, version })) };
+        timedOut: Boolean(resolution.timedOut), selectedUpdates: updates.map(({ name, fromVersion, version, level }) => ({ name, fromVersion, version, level })) };
     }
     const resolvedManifestBytes = await fs.readFile(path.join(projectRoot, 'package.json'));
     const resolvedLockBytes = await fs.readFile(path.join(projectRoot, 'package-lock.json'));
@@ -218,11 +271,15 @@ async function prepareDependencyBuild(session, selectedNames, options = {}) {
     files.set(rootLock, resolvedLockBytes);
     const lockChanges = changedLockEntries(lock, resolvedLock);
     const previewId = require('node:crypto').randomUUID();
+    const testScript = projectTestScript(manifest);
     const preview = {
       id: previewId,
+      rootName: session.rootName,
       files,
+      baselineFiles: new Map(session.files),
+      testScript,
       updates,
-      packageDiff: updates.map(({ name, fromVersion, fromSpec, version }) => ({ name, fromVersion, fromSpec, version })),
+      packageDiff: updates.map(({ name, fromVersion, fromSpec, version, level }) => ({ name, fromVersion, fromSpec, version, level })),
       lockChanges: lockChanges.slice(0, 200),
       omittedLockChanges: Math.max(0, lockChanges.length - 200),
       sourceFindings: options.sourceFindings ?? 0,
@@ -240,8 +297,9 @@ async function prepareDependencyBuild(session, selectedNames, options = {}) {
         install: 'npm ci --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ --userconfig=user.npmrc --globalconfig=global.npmrc --cache=.npm-cache',
         command: 'npm --ignore-scripts run build',
         script: manifest.scripts.build,
-        tests: 'not run',
-        warning: 'The build command executes uploaded project code. It runs in a temporary copy, not an OS sandbox.'
+        tests: testScript ? 'npm --ignore-scripts run test' : 'not available',
+        testScript,
+        warning: 'The build and test commands execute uploaded project code. They run in temporary copies, not an OS sandbox.'
       },
       internalPreview: preview
     };
@@ -258,26 +316,20 @@ async function runApprovedBuild(preview, options = {}) {
   }
   const staged = preview.internalPreview;
   staged.consumed = true;
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codebase-update-build-'));
-  try {
-    const projectRoot = await writeProjectFiles(staged.files, staged.files.keys().next().value.split('/')[0], tempRoot);
-    const install = await runNpm(['ci', ...npmOptions()], projectRoot, 'install', { ...options, tempRoot });
-    if (install.exitCode !== 0) return {
-      status: 'failed', stage: 'install', reason: install.reason || 'install-failed', output: install.output,
-      timedOut: Boolean(install.timedOut), tests: 'not run'
-    };
-    const build = await runNpm(['--ignore-scripts', 'run', 'build'], projectRoot, 'build', { ...options, tempRoot });
-    if (build.exitCode !== 0) return {
-      status: 'failed', stage: 'build', reason: build.reason || 'build-failed', output: build.output,
-      timedOut: Boolean(build.timedOut), tests: 'not run'
-    };
-    return {
-      status: 'passed', stage: 'build', output: build.output,
-      tests: 'not run', files: staged.files, updatedFiles: staged.files.size, updates: staged.updates
-    };
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+  const baseline = await baselineTests(staged, options);
+  const result = await checkProject(staged.files, staged.rootName, { build: true, test: Boolean(staged.testScript) }, options);
+  if (result.status !== 'passed') {
+    return { ...result, tests: projectTestSummary(baseline, null), baselineTests: baseline };
   }
+  const tests = projectTestSummary(baseline, result.tests);
+  if (tests.status === 'failed') {
+    return { status: 'failed', stage: 'tests', reason: 'tests-failed', output: result.tests.output,
+      timedOut: result.tests.timedOut, tests, baselineTests: baseline };
+  }
+  return {
+    status: 'passed', stage: 'build', output: result.output,
+    tests, baselineTests: baseline, files: staged.files, updatedFiles: staged.files.size, updates: staged.updates
+  };
 }
 
 module.exports = {
@@ -285,10 +337,14 @@ module.exports = {
   MAX_INSTALL_MS,
   MAX_OUTPUT_BYTES,
   MAX_RESOLUTION_MS,
+  MAX_TEST_MS,
+  checkProject,
   normalizeUpdates,
   npmOptions,
   processEnvironment,
   prepareDependencyBuild,
+  projectTestScript,
+  projectTestSummary,
   runNpm,
   runApprovedBuild,
   writeProjectFiles

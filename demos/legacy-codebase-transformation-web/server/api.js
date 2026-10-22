@@ -6,16 +6,19 @@ const express = require('express');
 const {
   MAX_UPLOAD_BYTES,
   MAX_UPLOAD_FILES,
+  acceptDependencyMigration,
   applyApprovedFindings,
   getSession,
   getTransformProgress,
   prepareApprovedUpdate,
   prepareUpload,
+  proposeDependencyMigration,
   removeSession,
   runApprovedUpdateBuild,
   transformUnits
 } = require('./workflow');
 const { getFoundryConfiguration } = require('./foundry-client');
+const { prepareEditorFolder, openVscode } = require('./editor-export');
 
 const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 
@@ -27,11 +30,6 @@ function renderChangeReport(report) {
     `Assessment after: ${report.after?.rating ?? 'not available'} | ${report.after?.debtMinutes ?? 0} debt minutes (${report.after?.debtHours ?? 0}h)`,
     '',
     `Source changes: ${report.sourceChanges.length}`,
-    `Package updates: ${report.packageChanges.length}`,
-    `Lock entries changed: ${report.lockChanges.length + report.omittedLockChanges}`,
-    `Build: ${report.build?.status ?? 'not run'}`,
-    ...(report.build?.characterisation ? [`Characterisation after dependency update: ${report.build.characterisation.status}${report.build.characterisation.results.map((item) => ` | ${item.name} ${item.matched}/${item.total}`).join('')}`] : []),
-    `Project tests: not run`,
     `Characterisation tests: ${report.tests}`,
     ...(report.testFiles?.length ? ['', 'Characterisation test files (run with `node --test`):', ...report.testFiles.map((file) => `- ${file}`)] : []),
     ''
@@ -58,20 +56,55 @@ function renderChangeReport(report) {
     } else lines.push('', `Characterisation: ${change.baseline?.reason ?? 'not checked'}`, '');
   }
 
-  if (report.packageChanges.length) {
-    lines.push('## Package Updates', '');
-    for (const update of report.packageChanges) lines.push(`- ${update.name}: ${update.fromVersion} -> ${update.version}`);
-    lines.push('');
-  }
+  if (report.packageChanges.length || report.lockChanges.length || report.omittedLockChanges || report.build || report.migration) {
+    lines.push('## Dependency Updates', '');
 
-  if (report.lockChanges.length || report.omittedLockChanges) {
-    lines.push('## Lockfile Changes', '');
-    for (const entry of report.lockChanges) lines.push(`- ${entry.name}: ${entry.from || 'new'} -> ${entry.to || 'removed'}`);
-    if (report.omittedLockChanges) lines.push(`- ${report.omittedLockChanges} additional entries omitted`);
-    lines.push('');
-  }
+    if (report.packageChanges.length) {
+      lines.push('### Package Updates', '');
+      for (const update of report.packageChanges) lines.push(`- ${update.name}: ${update.fromVersion} -> ${update.version}${update.level ? ` (${update.level})` : ''}`);
+      lines.push('');
+    }
 
-  if (report.build) lines.push('## Build Output', '', `Command: \`${report.build.command}\``, '', '```text', report.build.output || 'No output.', '```', '');
+    if (report.lockChanges.length || report.omittedLockChanges) {
+      lines.push('### Lockfile Changes', '');
+      for (const entry of report.lockChanges) lines.push(`- ${entry.name}: ${entry.from || 'new'} -> ${entry.to || 'removed'}`);
+      if (report.omittedLockChanges) lines.push(`- ${report.omittedLockChanges} additional entries omitted`);
+      lines.push('');
+    }
+
+    if (report.build || report.migration) {
+      const migrationEdits = report.migration?.edits ?? [];
+      const characterisation = report.build?.characterisation;
+      const characterisationResults = characterisation?.results ?? [];
+      lines.push('### Behavior Compatibility', '',
+        `Code changes needed for dependency compatibility: ${migrationEdits.length ? 'Yes' : 'No, not for the checks that ran.'}`,
+        `Compatibility code changes applied: ${migrationEdits.length ? `${migrationEdits.length} migration edit(s)` : 'None'}`,
+        `Validate build: ${report.build?.status ?? 'not run'}`,
+        `Project tests: original ${report.build?.tests?.baseline?.status ?? 'not run'}; upgraded ${report.build?.tests?.upgraded?.status ?? 'not run'}`,
+        `Post-update characterisation: ${characterisation?.status ?? 'not run'}${characterisationResults.map((item) => ` | ${item.name} ${item.matched}/${item.total}`).join('')}`,
+        'These results cover only the build, project tests, and captured characterisation cases listed here.', '');
+    }
+
+    if (report.migration) {
+      lines.push('### Compatibility Code Changes', '', report.migration.summary || 'A dependency migration was applied.', '');
+      for (const guide of report.migration.guides ?? []) lines.push(`- Curated guide: ${guide.title}`);
+      for (const edit of report.migration.edits) {
+        lines.push('', `#### ${edit.path}`, '', edit.rationale, '', '##### Before', '', '```text', edit.before, '```', '',
+          '##### After', '', '```text', edit.after, '```');
+      }
+      lines.push('');
+    }
+
+    if (report.build) {
+      lines.push('### Build Output', '', `Command: \`${report.build.command}\``, '', '```text', report.build.output || 'No output.', '```', '');
+      if (report.build.tests?.command) {
+        lines.push('### Project Test Output', '', `Command: \`${report.build.tests.command}\``, '',
+          `Original upload: ${report.build.tests.baseline?.status ?? 'not run'}`,
+          `Upgraded copy: ${report.build.tests.upgraded?.status ?? 'not run'}`, '',
+          '```text', report.build.tests.upgraded?.output || report.build.tests.baseline?.output || 'No output.', '```', '');
+      }
+    }
+  }
   return lines.join('\n');
 }
 
@@ -238,14 +271,14 @@ function createApiApp(options = {}) {
 
   app.post('/api/sessions/:sessionId/updates/prepare', async (request, response) => {
     const input = request.body;
-    if (!input || Object.keys(input).some((key) => !['approvedProposalIds', 'acknowledgedWarnings', 'selectedUpdateNames'].includes(key)) ||
-        !Array.isArray(input.approvedProposalIds) || !Array.isArray(input.acknowledgedWarnings ?? []) || !Array.isArray(input.selectedUpdateNames)) {
-      response.status(400).json({ error: 'Provide approved proposal IDs, warning acknowledgements, and selected dependency names.' });
+    if (!input || Object.keys(input).some((key) => !['approvedProposalIds', 'acknowledgedWarnings', 'selectedUpdates'].includes(key)) ||
+        !Array.isArray(input.approvedProposalIds) || !Array.isArray(input.acknowledgedWarnings ?? []) || !Array.isArray(input.selectedUpdates)) {
+      response.status(400).json({ error: 'Provide approved proposal IDs, warning acknowledgements, and selected dependency updates.' });
       return;
     }
     try {
       const preview = await prepareApprovedUpdate(request.params.sessionId, input.approvedProposalIds,
-        input.selectedUpdateNames, input.acknowledgedWarnings ?? [], {
+        input.selectedUpdates, input.acknowledgedWarnings ?? [], {
           runCommand: options.runDependencyCommand,
           runCharacterisationCommand: options.runCharacterisationCommand
         });
@@ -271,6 +304,47 @@ function createApiApp(options = {}) {
     }
   });
 
+  app.post('/api/sessions/:sessionId/updates/migrate', async (request, response) => {
+    const input = request.body;
+    if (!input || Object.keys(input).some((key) => !['migrationId', 'approved'].includes(key)) ||
+        typeof input.migrationId !== 'string' || input.approved !== true) {
+      response.status(400).json({ error: 'Approve sending the listed source files to Foundry and rerunning the checks.' });
+      return;
+    }
+    let config = options.config;
+    try {
+      config ??= getFoundryConfiguration(options.env);
+    } catch (error) {
+      response.status(503).json({ error: error.message });
+      return;
+    }
+    try {
+      response.json(await proposeDependencyMigration(request.params.sessionId, input.migrationId, {
+        config,
+        requestStructured: options.requestStructured,
+        fetchImpl: options.fetchImpl,
+        checkProject: options.checkProject,
+        runBuildCommand: options.runBuildCommand,
+        runCharacterisationCommand: options.runCharacterisationCommand
+      }));
+    } catch (error) {
+      response.status(error.statusCode || 400).json({ error: error.message || 'The dependency migration could not be proposed.' });
+    }
+  });
+
+  app.post('/api/sessions/:sessionId/updates/migrate/accept', (request, response) => {
+    const input = request.body;
+    if (!input || Object.keys(input).some((key) => key !== 'migrationId') || typeof input.migrationId !== 'string') {
+      response.status(400).json({ error: 'Provide the reviewed migration ID.' });
+      return;
+    }
+    try {
+      response.json(acceptDependencyMigration(request.params.sessionId, input.migrationId));
+    } catch (error) {
+      response.status(error.statusCode || 400).json({ error: error.message });
+    }
+  });
+
   app.delete('/api/sessions/:sessionId', (request, response) => {
     if (!removeSession(request.params.sessionId)) return response.status(404).json({ error: 'This review expired.' });
     return response.status(204).end();
@@ -292,9 +366,31 @@ function createApiApp(options = {}) {
     });
     archive.pipe(response);
     for (const [relativePath, bytes] of session.files) archive.append(bytes, { name: relativePath });
-    if (session.changeReport) archive.append(renderChangeReport(session.changeReport), { name: 'TECH-DEBT-REPORT.md' });
+    if (session.changeReport) archive.append(renderChangeReport(session.changeReport), { name: 'CODE-TRANSFORMATION-REPORT.md' });
     archive.finalize();
     return undefined;
+  });
+
+  app.post('/api/sessions/:sessionId/open-in-vscode', async (request, response) => {
+    if (request.headers.origin && request.headers.origin !== `${request.protocol}://${request.get('host')}`) {
+      return response.status(403).json({ error: 'Open VS Code from the local demo page.' });
+    }
+    if (request.body?.approved !== true) {
+      return response.status(400).json({ error: 'Approve saving the output copy and opening VS Code.' });
+    }
+    const session = getSession(request.params.sessionId);
+    if (!session) return response.status(404).json({ error: 'This review expired. Upload the folder again.' });
+    if (!session.applied) return response.status(409).json({ error: 'Approve and apply findings before opening VS Code.' });
+    try {
+      session.editorFolder ??= prepareEditorFolder(session, renderChangeReport(session.changeReport));
+      let folder;
+      try { folder = await session.editorFolder; }
+      catch (error) { delete session.editorFolder; throw error; }
+      await (options.openVscode ?? openVscode)(folder);
+      return response.json({ folder });
+    } catch {
+      return response.status(500).json({ error: 'Could not open VS Code. Check that VS Code is installed, or download the ZIP instead.' });
+    }
   });
 
   app.use((error, _request, response, _next) => {

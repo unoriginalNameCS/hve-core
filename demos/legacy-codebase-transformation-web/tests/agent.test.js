@@ -79,6 +79,11 @@ test('rewrite prompt names the exact identifier to rename and protects the signa
   const todoAssessment = assessProject([{ path, content: todoSource }]);
   const todoPrompt = buildRewritePrompt(todoAssessment.units.find((item) => item.name === 'price'), { status: 'not-checked' }, todoAssessment);
   assert.match(todoPrompt, /delete the TODO\/FIXME\/HACK comment\. Do not implement what it describes/);
+  const branchSource = "function label(status) { if (status === 'draft') return 'Pending'; else if (status === 'approved') return 'Ready'; else if (status === 'review') return 'Review'; else if (status === 'rejected') return 'Declined'; else if (status === 'void') return 'Cancelled'; else if (status === 'expired') return 'Expired'; return 'Unknown'; }";
+  const branchAssessment = assessProject([{ path, content: branchSource }]);
+  const branchPrompt = buildRewritePrompt(branchAssessment.units.find((item) => item.name === 'label'), { status: 'not-checked' }, branchAssessment);
+  assert.match(branchPrompt, /replace the chain with a Map lookup and preserve the exact fallback/);
+  assert.match(branchPrompt, /at most 5 branches in any if\/else-if chain/);
 });
 
 test('retry feedback lists unresolved findings', () => {

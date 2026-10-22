@@ -39,6 +39,22 @@ function traverseFunction(ast, node, visitors) {
   });
 }
 
+function isElseIfChainAncestor(ancestor, path) {
+  let current = path;
+  while (current.parentPath && current.parentPath !== ancestor) {
+    const parent = current.parentPath;
+    if (!parent.isIfStatement() || parent.node.alternate !== current.node) return false;
+    current = parent;
+  }
+  return current.parentPath === ancestor && ancestor.node.alternate === current.node;
+}
+
+function nestingDepth(path, node) {
+  const ancestors = path.getAncestry().filter((ancestor) => ancestor.node !== node && ancestor.node !== path.node &&
+    CONTROL_NODES.has(ancestor.node.type) && !(ancestor.isIfStatement() && isElseIfChainAncestor(ancestor, path)));
+  return ancestors.length + 1;
+}
+
 function isLiteralInit(init) {
   if (!init) return false;
   if (['NumericLiteral', 'StringLiteral', 'BooleanLiteral'].includes(init.type)) return true;
@@ -82,8 +98,7 @@ function measureFunction(ast, node, content) {
       }
     },
     IfStatement(path) {
-      const depth = path.getAncestry().filter((ancestor) => ancestor.node !== node && CONTROL_NODES.has(ancestor.node.type)).length;
-      maxNesting = Math.max(maxNesting, depth + 1);
+      maxNesting = Math.max(maxNesting, nestingDepth(path, node));
       complexity += 1;
       let chainLength = 1;
       let alternate = path.node.alternate;
@@ -94,13 +109,11 @@ function measureFunction(ast, node, content) {
       maxBranchChain = Math.max(maxBranchChain, chainLength);
     },
     'ForStatement|ForInStatement|ForOfStatement|WhileStatement|DoWhileStatement|CatchClause'(path) {
-      const depth = path.getAncestry().filter((ancestor) => ancestor.node !== node && CONTROL_NODES.has(ancestor.node.type)).length;
-      maxNesting = Math.max(maxNesting, depth + 1);
+      maxNesting = Math.max(maxNesting, nestingDepth(path, node));
       complexity += 1;
     },
     SwitchStatement(path) {
-      const depth = path.getAncestry().filter((ancestor) => ancestor.node !== node && CONTROL_NODES.has(ancestor.node.type)).length;
-      maxNesting = Math.max(maxNesting, depth + 1);
+      maxNesting = Math.max(maxNesting, nestingDepth(path, node));
       const cases = path.node.cases.filter((item) => item.test !== null).length;
       complexity += cases;
       maxBranchChain = Math.max(maxBranchChain, path.node.cases.length);

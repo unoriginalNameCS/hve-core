@@ -39,7 +39,7 @@ function updateFixture() {
     registry: [{
       name: 'mkdirp', status: 'completed', declarations: [{
         manifest: 'sample/package.json', spec: '0.5.1', groups: ['dependencies'], lockedVersions: ['0.5.1'],
-        updateCandidate: { version: '3.0.1', status: 'completed', deprecated: null }
+        updateOptions: [{ version: '3.0.1', status: 'completed', deprecated: null, level: 'major' }]
       }]
     }]
   };
@@ -64,15 +64,17 @@ function resolvingRunner(calls) {
   };
 }
 
+const MKDIRP_MAJOR = [{ name: 'mkdirp', level: 'major' }];
+
 test('update preview resolves only selected direct candidates and shows lock changes before build', async () => {
   const sample = updateFixture();
   const calls = [];
-  const preview = await prepareDependencyBuild(sample, ['mkdirp'], {
+  const preview = await prepareDependencyBuild(sample, MKDIRP_MAJOR, {
     runCommand: resolvingRunner(calls)
   });
 
   assert.equal(preview.status, 'ready');
-  assert.deepEqual(preview.packageDiff, [{ name: 'mkdirp', fromVersion: '0.5.1', fromSpec: '0.5.1', version: '3.0.1' }]);
+  assert.deepEqual(preview.packageDiff, [{ name: 'mkdirp', fromVersion: '0.5.1', fromSpec: '0.5.1', version: '3.0.1', level: 'major' }]);
   assert.ok(preview.lockChanges.some((entry) => entry.name === 'mkdirp' && entry.from === '0.5.1' && entry.to === '3.0.1'));
   assert.equal(preview.build.command, 'npm --ignore-scripts run build');
   assert.match(preview.build.warning, /not an OS sandbox/);
@@ -87,7 +89,7 @@ test('approved build installs without lifecycle scripts and returns staged files
     sample.files.set(`sample/${config}`, Buffer.from('ignore-scripts=false\n'));
   }
   const calls = [];
-  const preview = await prepareDependencyBuild(sample, ['mkdirp'], { runCommand: resolvingRunner(calls) });
+  const preview = await prepareDependencyBuild(sample, MKDIRP_MAJOR, { runCommand: resolvingRunner(calls) });
   const build = await runApprovedBuild(preview, { runCommand: async (command) => {
     for (const config of ['.npmrc', 'user.npmrc', 'global.npmrc']) {
       assert.equal(await fs.readFile(path.join(command.cwd, config), 'utf8'), '');
@@ -96,7 +98,7 @@ test('approved build installs without lifecycle scripts and returns staged files
   } });
 
   assert.equal(build.status, 'passed');
-  assert.deepEqual(build.tests, 'not run');
+  assert.equal(build.tests.status, 'not-available');
   assert.equal(build.files.size, sample.files.size);
   assert.equal(JSON.parse(build.files.get('sample/package.json').toString()).dependencies.mkdirp, '3.0.1');
   assert.deepEqual(calls.map((call) => call.stage), ['resolve', 'install', 'build']);
@@ -108,7 +110,7 @@ test('approved build installs without lifecycle scripts and returns staged files
 
 test('failed build returns bounded failure without staged output or original changes', async () => {
   const sample = updateFixture();
-  const preview = await prepareDependencyBuild(sample, ['mkdirp'], { runCommand: resolvingRunner([]) });
+  const preview = await prepareDependencyBuild(sample, MKDIRP_MAJOR, { runCommand: resolvingRunner([]) });
   const result = await runApprovedBuild(preview, {
     runCommand: async ({ stage }) => stage === 'build' ? { exitCode: 1, output: 'build failed' } : { exitCode: 0, output: '' }
   });
@@ -124,10 +126,56 @@ test('missing build script and unknown update candidates are rejected before res
   const sample = updateFixture();
   sample.files.set('sample/package.json', Buffer.from(JSON.stringify({ name: 'sample', dependencies: { mkdirp: '0.5.1' } })));
   const calls = [];
-  await assert.rejects(() => prepareDependencyBuild(sample, ['mkdirp'], { runCommand: resolvingRunner(calls) }), /build-unavailable/);
+  await assert.rejects(() => prepareDependencyBuild(sample, MKDIRP_MAJOR, { runCommand: resolvingRunner(calls) }), /build-unavailable/);
   assert.equal(calls.length, 0);
 
   const withBuild = updateFixture();
-  await assert.rejects(() => prepareDependencyBuild(withBuild, ['lodash'], { runCommand: resolvingRunner(calls) }), /candidate-unavailable/);
+  await assert.rejects(() => prepareDependencyBuild(withBuild, [{ name: 'lodash', level: 'patch' }], { runCommand: resolvingRunner(calls) }), /candidate-unavailable/);
+  await assert.rejects(() => prepareDependencyBuild(withBuild, [{ name: 'mkdirp', level: 'patch' }], { runCommand: resolvingRunner(calls) }), /candidate-unavailable/);
+  await assert.rejects(() => prepareDependencyBuild(withBuild, [{ name: 'mkdirp', level: 'major', version: '9.0.0' }], { runCommand: resolvingRunner(calls) }), /invalid-selection/);
   assert.equal(calls.length, 0);
+});
+
+function withTestScript(sample) {
+  const manifest = JSON.parse(sample.files.get('sample/package.json').toString());
+  manifest.scripts.test = 'node --test';
+  sample.files.set('sample/package.json', Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`));
+  return sample;
+}
+
+function testRunner(results, calls) {
+  const resolve = resolvingRunner([]);
+  return async (command) => {
+    const manifest = JSON.parse(await fs.readFile(path.join(command.cwd, 'package.json'), 'utf8'));
+    const copy = manifest.dependencies.mkdirp === '3.0.1' ? 'upgraded' : 'original';
+    calls.push(`${copy}:${command.stage}`);
+    if (command.stage === 'test') return { exitCode: results[copy] ? 0 : 1, output: `${copy} tests ${results[copy] ? 'passed' : 'failed'}` };
+    return resolve(command);
+  };
+}
+
+test('project tests run on the original and upgraded copies and block an upgrade that breaks passing tests', async () => {
+  const calls = [];
+  const sample = withTestScript(updateFixture());
+  const preview = await prepareDependencyBuild(sample, MKDIRP_MAJOR, { runCommand: resolvingRunner([]) });
+  assert.equal(preview.build.tests, 'npm --ignore-scripts run test');
+  const result = await runApprovedBuild(preview, { runCommand: testRunner({ original: true, upgraded: false }, calls) });
+
+  assert.deepEqual(calls, ['original:install', 'original:test', 'upgraded:install', 'upgraded:build', 'upgraded:test']);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.stage, 'tests');
+  assert.equal(result.tests.baseline.status, 'passed');
+  assert.equal(result.tests.upgraded.status, 'failed');
+  assert.match(result.output, /upgraded tests failed/);
+  assert.equal(Object.hasOwn(result, 'files'), false);
+});
+
+test('project tests that already fail on the original upload are reported but do not gate the upgrade', async () => {
+  const sample = withTestScript(updateFixture());
+  const preview = await prepareDependencyBuild(sample, MKDIRP_MAJOR, { runCommand: resolvingRunner([]) });
+  const result = await runApprovedBuild(preview, { runCommand: testRunner({ original: false, upgraded: false }, []) });
+
+  assert.equal(result.status, 'passed');
+  assert.equal(result.tests.status, 'not-gating');
+  assert.match(result.tests.reason, /did not pass on the original upload/);
 });

@@ -36,6 +36,35 @@ test('accepts a same-span rewrite that preserves the signature and improves targ
   assert.equal(gateStatus(result, 'no-new-findings'), 'pass');
 });
 
+test('accepts a lookup-table rewrite for a long fixed-value branch chain', () => {
+  const source = [
+    'function formatInvoiceStatus(status) {',
+    "  if (status === 'draft') return 'Pending';",
+    "  else if (status === 'approved') return 'Ready';",
+    "  else if (status === 'review') return 'Needs review';",
+    "  else if (status === 'rejected') return 'Declined';",
+    "  else if (status === 'void') return 'Cancelled';",
+    "  else if (status === 'expired') return 'Expired';",
+    "  return 'Unknown';",
+    '}',
+    'module.exports = { formatInvoiceStatus };'
+  ].join('\n');
+  const fixture = prepare(source, 'formatInvoiceStatus');
+  assert.ok(fixture.unit.findings.some((item) => item.ruleId === 'long-branch-chain'));
+  const replacement = [
+    'function formatInvoiceStatus(status) {',
+    '  const labels = new Map([',
+    "    ['draft', 'Pending'], ['approved', 'Ready'], ['review', 'Needs review'],",
+    "    ['rejected', 'Declined'], ['void', 'Cancelled'], ['expired', 'Expired']",
+    '  ]);',
+    "  return labels.get(status) ?? 'Unknown';",
+    '}'
+  ].join('\n');
+  const result = evaluateReplacement({ ...fixture, replacementText: replacement });
+  assert.equal(result.accepted, true, JSON.stringify(result.gates));
+  assert.equal(gateStatus(result, 'metric-improvement'), 'pass');
+});
+
 test('rejects invalid syntax and changed signatures or exports', () => {
   const fixture = prepare('function calculate(value) { return value + 3; }\nmodule.exports = { calculate };');
   const invalid = evaluateReplacement({ ...fixture, replacementText: 'function calculate(value) {' });

@@ -8,10 +8,11 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "build": "node scripts/build.js"
+    "build": "node scripts/build.js",
+    "test": "node --test test/due-date.test.js"
   },
   "dependencies": {
-    "lodash": "4.17.20",
-    "uuid": "3.4.0"
+    "date-fns": "1.28.4",
+    "lodash": "4.17.20"
   }
 }
